@@ -1,0 +1,87 @@
+AN311 - anemometer (distant) [m/s]
+•	sensor type: anemometer -5-5
+•	kind: alarming
+AN422 - anemometer [m/s]
+•	sensor type: anemometer -5-5
+•	kind: switching off
+AN423 - anemometer [m/s]
+•	sensor type: anemometer -5-5
+•	kind: switching off
+TP1721 - temperature [C]
+•	sensor type: temperature THP (three-component sensor THP2/93)
+•	kind: registering
+RH1722 - humidity [%RH]
+•	sensor type: humidity THP (three-component sensor THP2/93)
+•	kind: registering
+BA1723 - barometer [hPa]
+•	sensor type: barometer THP (three-component sensor THP2/93)
+•	kind: registering
+TP1711 - temperature [C]
+•	sensor type: temperature THP (three-component sensor THP2/94)
+•	kind: registering
+RH1712 - humidity [%RH]
+•	sensor type: humidity THP (three-component sensor THP2/94)
+•	kind: registering
+BA1713 - barometer [hPa]
+•	sensor type: barometer THP (three-component sensor THP2/94)
+•	kind: registering
+MM252 – methane meter (distant) [%CH4]
+•	sensor type: methane meter MM-2PWk
+•	kind: switching off
+•	value of threshold A (alarm): 2.0%
+•	value of threshold W (warning): 1.5%
+MM261 – methane meter [%CH4]
+•	sensor type: methane meter MM-2PWk
+•	kind: switching off
+•	value of threshold A: 1.5%
+•	value of threshold W: 1.0%
+MM262 - methane meter [%CH4]
+•	sensor type: methane meter MM-2PWk
+•	kind: switching off
+•	value of threshold A: 1.0%
+•	value of threshold W: 0.6%
+MM263 - methane meter [%CH4] - !target sensor!
+•	sensor type: methane meter MM-2PWk
+•	kind: switching off
+•	value of threshold A: 1.5%
+•	value of threshold W: 1.0%
+MM264 - methane meter [%CH4] - !target sensor!
+•	sensor type: methane meter MM-2PWk
+•	kind: switching off
+•	value of threshold A: 1.5%
+•	value of threshold W: 1.0%
+MM256 - methane meter [%CH4] - !target sensor!
+•	sensor type: methane meter MM-2PWk
+•	kind: switching off
+•	value of threshold A: 1.5%
+•	value of threshold W: 1.0%
+MM211 - methane meter [%CH4]
+•	sensor type: methane meter MM-2PWk
+•	kind: switching off
+•	value of threshold A: 2.0%
+•	value of threshold W: 1.5%
+CM861 – high concentration methane meter [%CH4]
+•	sensor type: methane meter (0…100)
+•	kind: registering
+CR863 – sensor for pressure difference on the methane drainage flange [Pa]
+•	sensor type: pressure difference (0..250)
+•	kind: registering
+CR863 - sensor for pressure difference on the methane drainage flange [Pa]
+•	sensor type: pressure difference (0..250)
+•	kind: registering
+P_864 – pressure inside the methane drainage pipeline [kPa]
+•	sensor type: pressure (0..110)
+•	kind: registering
+TC862 – temperature inside the pipeline [C]
+•	sensor type: temperature (10..40)
+•	kind: registering
+WM868 – methane delivery calculated according to CM, CR, P, TC [m3/mi]
+•	sensor type: methane delivery (0..50)
+•	kind: registering
+AMP1_IR - current of the left cutting head of the cutter loader [A]
+AMP2_IR - current of the right cutting head of the cutter loader [A]
+DMP3_IR - current of the left haulage in the cutter loader [A]
+DMP4_IR - current of the right haulage in the cutter loader [A]
+AMP5_IR – current of the hydraulic pump engine in the cutter loader [A]
+F_SIDE - driving direction, 1=left, {0, 0.5}=right
+V - cutter loader speed [Hz] (Vmin=3Hz, Vmax=100Hz. Herz values are then transformed into m/min - 100Hz equal to about 20 m/min)
