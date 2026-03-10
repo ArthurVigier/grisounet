@@ -11,7 +11,9 @@ from sklearn.preprocessing import MinMaxScaler
 # Loading the dataset from local directory raw_data
 df = pd.read_csv('raw_data/methane_data.csv')
 
+# Preprocess function
 def preprocess_features(df: pd.DataFrame) -> pd.DataFrame:
+
     # Create datetime indication for time, drop previous time indications
     df['time'] = pd.to_datetime(df[['year', 'month', 'day', 'hour', 'minute', 'second']])
     df.set_index('time')
