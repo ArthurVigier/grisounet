@@ -1,7 +1,7 @@
 from google.cloud import bigquery
-PROJECT = "my-project"
-DATASET = "taxifare_dataset"
-TABLE = "processed_1k"
+PROJECT = "spheric-voyager-484810-k0"
+DATASET = "grisou"
+TABLE = "Table_grisou"
 query = f"""
 SELECT *
 FROM {PROJECT}.{DATASET}.{TABLE}
