@@ -1,0 +1,72 @@
+{
+  "anemometers": {
+    "AN422": "airflow_headgate_ms",
+    "AN423": "airflow_tailgate_ms",
+    "AN311": "airflow_return_ms"
+  },
+  "environment_headgate_thp94": {
+    "TP1711": "temperature_headgate_C",
+    "RH1712": "humidity_headgate_pct",
+    "BA1713": "barometer_headgate_hPa"
+  },
+  "environment_tailgate_thp93": {
+    "TP1721": "temperature_tailgate_C",
+    "RH1722": "humidity_tailgate_pct",
+    "BA1723": "barometer_tailgate_hPa"
+  },
+  "methane_meters": {
+    "MM252": "methane_return_pct",
+    "MM261": "methane_tailgate_entry_pct",
+    "MM262": "methane_face_pct",
+    "MM263": "methane_target1_pct",
+    "MM264": "methane_target2_pct",
+    "MM256": "methane_target3_pct",
+    "MM211": "methane_headgate_exit_pct"
+  },
+  "drainage_pipeline": {
+    "CM861": "methane_high_conc_pct",
+    "CR863": "drainage_pressure_diff_Pa",
+    "P_864": "drainage_pressure_kPa",
+    "TC862": "drainage_temperature_C",
+    "WM868": "methane_delivery_m3min"
+  },
+  "shearer": {
+    "AMP1_IR": "shearer_left_head_A",
+    "AMP2_IR": "shearer_right_head_A",
+    "DMP3_IR": "shearer_left_haulage_A",
+    "DMP4_IR": "shearer_right_haulage_A",
+    "AMP5_IR": "shearer_hydraulic_pump_A",
+    "F_SIDE": "shearer_direction",
+    "V": "shearer_speed_Hz"
+  },
+  "flat_mapping": {
+    "AN311": "airflow_return_ms",
+    "AN422": "airflow_headgate_ms",
+    "AN423": "airflow_tailgate_ms",
+    "TP1721": "temperature_tailgate_C",
+    "RH1722": "humidity_tailgate_pct",
+    "BA1723": "barometer_tailgate_hPa",
+    "TP1711": "temperature_headgate_C",
+    "RH1712": "humidity_headgate_pct",
+    "BA1713": "barometer_headgate_hPa",
+    "MM252": "methane_return_pct",
+    "MM261": "methane_tailgate_entry_pct",
+    "MM262": "methane_face_pct",
+    "MM263": "methane_target1_pct",
+    "MM264": "methane_target2_pct",
+    "MM256": "methane_target3_pct",
+    "MM211": "methane_headgate_exit_pct",
+    "CM861": "methane_high_conc_pct",
+    "CR863": "drainage_pressure_diff_Pa",
+    "P_864": "drainage_pressure_kPa",
+    "TC862": "drainage_temperature_C",
+    "WM868": "methane_delivery_m3min",
+    "AMP1_IR": "shearer_left_head_A",
+    "AMP2_IR": "shearer_right_head_A",
+    "DMP3_IR": "shearer_left_haulage_A",
+    "DMP4_IR": "shearer_right_haulage_A",
+    "AMP5_IR": "shearer_hydraulic_pump_A",
+    "F_SIDE": "shearer_direction",
+    "V": "shearer_speed_Hz"
+  }
+}
