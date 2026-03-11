@@ -15,12 +15,13 @@ def load_data_local() -> pd.DataFrame:
     return pd.read_csv('raw_data/methane_data.csv')
 
 
-def preprocess_split(df: pd.DataFrame) -> tuple:
+def preprocess_split(df: pd.DataFrame, test_size: float =0.3) -> tuple:
     """ Preprocess function --> datetime / a single current intensity feature / train_test split / scaled values
+        takes as input a DataFrame and a test_size (defaulting to 0.3 when no test_size argument is passed)
         returns a tuple containing two scaled dateasets : train_data and test_data """
 
     # Create a copy of the initial DataFrame before editing it
-    df = df/copy()
+    df = df.copy()
 
     # Create datetime indication for time, drop previous time indications
     df['time'] = pd.to_datetime(df[['year', 'month', 'day', 'hour', 'minute', 'second']])
@@ -32,7 +33,7 @@ def preprocess_split(df: pd.DataFrame) -> tuple:
     df.drop(columns=['AMP1_IR', 'AMP2_IR', 'DMP3_IR', 'DMP4_IR', 'AMP5_IR'], inplace=True)
 
     # Split dataframe into train and test datasets - not separating targets from features for now (model-dependent need)
-    train_data, test_data = train_test_split(df, test_size=0.3, shuffle=False)
+    train_data, test_data = train_test_split(df, test_size=test_size, shuffle=False)
 
     # Scale numerical features without data leakage
     features_to_scale = ['AN311', 'AN422', 'AN423', 'TP1721', 'RH1722', 'BA1723', 'TP1711', 'RH1712', 'BA1713', 'MM252', 'MM261', 'MM262', 'MM263',\
@@ -41,8 +42,6 @@ def preprocess_split(df: pd.DataFrame) -> tuple:
     for feature in features_to_scale :
         train_data[feature] = mm_scaler.fit_transform(train_data[[feature]])
         test_data[feature] =  mm_scaler.transform(test_data[[feature]])
-
-    print("✅ train and test data processed and scaled, with shape", train_data.shape, test_data.shape)
 
     return train_data, test_data
 
