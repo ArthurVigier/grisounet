@@ -7,7 +7,7 @@ SELECT *
 FROM {PROJECT}.{DATASET}.{TABLE}
 LIMIT 1000
 """
-client = bigquery.Client(project=gcp_project)
+client = bigquery.Client(project=PROJECT)
 query_job = client.query(query)
 result = query_job.result()
 df = result.to_dataframe()
@@ -17,6 +17,6 @@ df = result.to_dataframe()
 
 SOURCE = "spheric-voyager-484810-k0.grisou.Table_grisou"
 
-bq load --autodetect $DATASET.$TABLE $SOURCE
+#bq load --autodetect $DATASET.$TABLE $SOURCE
 
-SELECT year, month, year, year, year, minute, minute FROM `spheric-voyager-484810-k0.grisou.Table_grisou` LIMIT 1000
+#SELECT year, month, year, year, year, minute, minute FROM `spheric-voyager-484810-k0.grisou.Table_grisou` LIMIT 1000
