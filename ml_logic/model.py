@@ -4,6 +4,8 @@ from aeon.transformations.collection.feature_based import Catch22
 # Exemple simple
 import numpy as np
 import pandas as pd
+from sklearn.metrics import make_scorer
+
 
 catch22_feature_names = [
     "DN_HistogramMode_5",
@@ -50,3 +52,7 @@ def catch22_features(df, target_col):
     print(feature_names)
     df_transformed = pd.DataFrame(df_transformed, columns=feature_names)
     return df_transformed
+
+def smap_loss(y_true, y_pred):
+    return 200 * np.mean(np.abs(y_true - y_pred) / (np.abs(y_true) + np.abs(y_pred) + 1e-8))
+    
