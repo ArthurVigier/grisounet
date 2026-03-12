@@ -64,20 +64,16 @@ def load_and_preprocess():
     return MM256_df, MM263_df, MM264_df , test_df , df
 
 def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
-    import numpy as np
-    import pandas as pd
-    from sklearn.linear_model import Ridge
-    from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_pinball_loss
 
-    # ----------------------------
+        # ----------------------------
     # Paramètres
     # ----------------------------
     lags = lags
     alpha = alpha
     test_ratio = test_ratio
-    horizon = horizon  # prédiction à t+30
+    horizon = horizon  # prédiction à t+180
     # ----------------------------
-    # Préparation
+    # Préparation des données (commune aux deux modèles)
     # ----------------------------
     X_df = df.drop(columns=[target_col]).reset_index(drop=True)
     y_series = df[target_col].reset_index(drop=True).shift(-horizon)
@@ -99,19 +95,19 @@ def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
     print("X_lagged shape:", X_lagged.shape)
 
     # ----------------------------
-    # Assemblage
+    # Assemblage et nettoyage
     # ----------------------------
-    data = pd.concat([X_lagged, y_series.rename("MM256")], axis=1)
+    data = pd.concat([X_lagged, y_series.rename(target_col)], axis=1)
 
     print("data shape before cleaning:", data.shape)
-    print("NaN in target:", data["MM256"].isna().sum())
+    print("NaN in target:", data[target_col].isna().sum())
     print("NaN total before cleaning:", data.isna().sum().sum())
 
     # 1) On enlève seulement la dernière ligne sans target
-    data = data.dropna(subset=["MM256"]).reset_index(drop=True)
+    data = data.dropna(subset=[target_col]).reset_index(drop=True)
 
     # 2) On remplit les NaN des features
-    feature_cols = [col for col in data.columns if col != "MM256"]
+    feature_cols = [col for col in data.columns if col != target_col]
     data[feature_cols] = data[feature_cols].fillna(0)
 
     print("data shape after target cleaning:", data.shape)
@@ -121,7 +117,7 @@ def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
     # Matrices finales
     # ----------------------------
     X = data[feature_cols].values
-    y = data["MM256"].values
+    y = data[target_col].values
 
     print("Final X shape:", X.shape)
     print("Final y shape:", y.shape)
@@ -134,29 +130,34 @@ def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
 
-    print("Train shape:", X_train.shape, y_train.shape)
-    print("Test shape :", X_test.shape, y_test.shape)
+    print("Train shape (Ridge/FFN):", X_train.shape, y_train.shape)
+    print("Test shape (Ridge/FFN) :", X_test.shape, y_test.shape)
 
     # ----------------------------
-    # Entraînement
+    # Reshaping pour LSTM
     # ----------------------------
-    model = Ridge(alpha=alpha)
-    model.fit(X_train, y_train)
+    # LSTM expects input in the form (samples, timesteps, features)
+    # Here, timesteps = lags, features = X_df.shape[1] (original features)
 
-    # ----------------------------
-    # Prédiction
-    # ----------------------------
-    y_pred = model.predict(X_test)
+    X_train_reshaped = X_train.reshape(X_train.shape[0], lags, X_df.shape[1])
+    X_test_reshaped = X_test.reshape(X_test.shape[0], lags, X_df.shape[1])
 
-    # ----------------------------
-    # Évaluation
-    # ----------------------------
-    pinball = mean_pinball_loss(y_test, y_pred, alpha=0.5)
-    mae = mean_absolute_error(y_test, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    print(f"Reshaped X_train shape (LSTM): {X_train_reshaped.shape}")
+    print(f"Reshaped X_test shape (LSTM): {X_test_reshaped.shape}")
 
-    print("Pinball Loss (q=0.5):", pinball)
-    print("MAE:", mae)
-    print("RMSE:", rmse)
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import Dense, LSTM, Input
+    import tensorflow as tf
 
-    return model
+    def pinball_loss_keras(y_true, y_pred, quantile=0.5):
+        error = y_true - y_pred
+        return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
+
+    model = Sequential()
+    # Input layer for LSTM expects (timesteps, features)
+    model.add(Input(shape=(lags, X_df.shape[1])))
+    model.add(LSTM(units=64)) # Using LSTM instead of SimpleRNN
+    model.add(Dense(1))
+    model.compile(optimizer='adam', loss=lambda y_true, y_pred: pinball_loss_keras(y_true, y_pred, quantile=0.5))
+    model.fit(X_train_reshaped, y_train, epochs=10, batch_size=32, validation_split=0.2)
+    y_pred = model.predict(X_test_reshaped)
