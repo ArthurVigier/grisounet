@@ -161,3 +161,5 @@ def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
     model.compile(optimizer='adam', loss=lambda y_true, y_pred: pinball_loss_keras(y_true, y_pred, quantile=0.5))
     model.fit(X_train_reshaped, y_train, epochs=10, batch_size=32, validation_split=0.2)
     y_pred = model.predict(X_test_reshaped)
+
+    return model , y_test , y_pred
