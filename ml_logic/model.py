@@ -5,6 +5,7 @@ from aeon.transformations.collection.feature_based import Catch22
 import numpy as np
 import pandas as pd
 from sklearn.metrics import make_scorer
+from ml_logic.preprocessor import load_data_local , preprocess_split, sample_datasets,feature_target
 
 
 catch22_feature_names = [
@@ -55,4 +56,105 @@ def catch22_features(df, target_col):
 
 def smap_loss(y_true, y_pred):
     return 200 * np.mean(np.abs(y_true - y_pred) / (np.abs(y_true) + np.abs(y_pred) + 1e-8))
-    
+
+def load_and_preprocess():
+    df = load_data_local()
+    train_df, test_df = preprocess_split(df)
+    MM256_df, MM263_df, MM264_df = sample_datasets(train_df)
+    return MM256_df, MM263_df, MM264_df , test_df , df
+
+def lstm(df,target_col):
+    import numpy as np
+    import pandas as pd
+    from sklearn.linear_model import Ridge
+    from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_pinball_loss
+
+    # ----------------------------
+    # Paramètres
+    # ----------------------------
+    lags = 300
+    alpha = 1.0
+    test_ratio = 0.3
+    horizon = 180  # prédiction à t+30
+    # ----------------------------
+    # Préparation
+    # ----------------------------
+    X_df = df.drop(columns=[target_col]).reset_index(drop=True)
+    y_series = df[target_col].reset_index(drop=True).shift(-horizon)
+
+    print("X_df shape:", X_df.shape)
+    print("y_series shape:", y_series.shape)
+
+    # ----------------------------
+    # Création des lags
+    # ----------------------------
+    lagged_dfs = []
+    for i in range(1, lags + 1):
+        lag_i = X_df.shift(i).copy()
+        lag_i.columns = [f"{col}_lag{i}" for col in X_df.columns]
+        lagged_dfs.append(lag_i)
+
+    X_lagged = pd.concat(lagged_dfs, axis=1)
+
+    print("X_lagged shape:", X_lagged.shape)
+
+    # ----------------------------
+    # Assemblage
+    # ----------------------------
+    data = pd.concat([X_lagged, y_series.rename("MM256")], axis=1)
+
+    print("data shape before cleaning:", data.shape)
+    print("NaN in target:", data["MM256"].isna().sum())
+    print("NaN total before cleaning:", data.isna().sum().sum())
+
+    # 1) On enlève seulement la dernière ligne sans target
+    data = data.dropna(subset=["MM256"]).reset_index(drop=True)
+
+    # 2) On remplit les NaN des features
+    feature_cols = [col for col in data.columns if col != "MM256"]
+    data[feature_cols] = data[feature_cols].fillna(0)
+
+    print("data shape after target cleaning:", data.shape)
+    print("NaN total after feature fill:", data.isna().sum().sum())
+
+    # ----------------------------
+    # Matrices finales
+    # ----------------------------
+    X = data[feature_cols].values
+    y = data["MM256"].values
+
+    print("Final X shape:", X.shape)
+    print("Final y shape:", y.shape)
+
+    # ----------------------------
+    # Split temporel
+    # ----------------------------
+    split = int(len(X) * (1 - test_ratio))
+
+    X_train, X_test = X[:split], X[split:]
+    y_train, y_test = y[:split], y[split:]
+
+    print("Train shape:", X_train.shape, y_train.shape)
+    print("Test shape :", X_test.shape, y_test.shape)
+
+    # ----------------------------
+    # Entraînement
+    # ----------------------------
+    model = Ridge(alpha=alpha)
+    model.fit(X_train, y_train)
+
+    # ----------------------------
+    # Prédiction
+    # ----------------------------
+    y_pred = model.predict(X_test)
+
+    # ----------------------------
+    # Évaluation
+    # ----------------------------
+    pinball = mean_pinball_loss(y_test, y_pred, alpha=0.5)
+    mae = mean_absolute_error(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+
+    print("Pinball Loss (q=0.5):", pinball)
+    print("MAE:", mae)
+    print("RMSE:", rmse)
