@@ -6,6 +6,9 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import make_scorer
 from ml_logic.preprocessor import load_data_local , preprocess_split, sample_datasets,feature_target
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, LSTM, Input
+import tensorflow as tf
 
 
 catch22_feature_names = [
@@ -145,9 +148,6 @@ def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
     print(f"Reshaped X_train shape (LSTM): {X_train_reshaped.shape}")
     print(f"Reshaped X_test shape (LSTM): {X_test_reshaped.shape}")
 
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import Dense, LSTM, Input
-    import tensorflow as tf
 
     def pinball_loss_keras(y_true, y_pred, quantile=0.5):
         error = y_true - y_pred
