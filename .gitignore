@@ -1,3 +1,8 @@
 raw_data/
-*.ipynb
 .env
+*.ipynb
+.python-version
+*.pptx
+*Zone*
+*__pyc*
+*.DS*
