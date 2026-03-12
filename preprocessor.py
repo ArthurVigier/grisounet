@@ -34,3 +34,8 @@ def preprocess_features(df: pd.DataFrame) -> pd.DataFrame:
     print("✅ df_scaled processed, with shape", df_scaled.shape)
 
     return df_scaled
+
+if __name__ == "__main__":
+    df_result = preprocess_features(df)
+    df_result.to_csv('raw_data/methane_data_processed.csv', index=False)
+    print("Fichier sauvegardé !")
