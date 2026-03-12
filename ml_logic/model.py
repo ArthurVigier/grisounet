@@ -63,7 +63,7 @@ def load_and_preprocess():
     MM256_df, MM263_df, MM264_df = sample_datasets(train_df)
     return MM256_df, MM263_df, MM264_df , test_df , df
 
-def lstm(df,target_col):
+def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
     import numpy as np
     import pandas as pd
     from sklearn.linear_model import Ridge
@@ -72,10 +72,10 @@ def lstm(df,target_col):
     # ----------------------------
     # Paramètres
     # ----------------------------
-    lags = 300
-    alpha = 1.0
-    test_ratio = 0.3
-    horizon = 180  # prédiction à t+30
+    lags = lags
+    alpha = alpha
+    test_ratio = test_ratio
+    horizon = horizon  # prédiction à t+30
     # ----------------------------
     # Préparation
     # ----------------------------
