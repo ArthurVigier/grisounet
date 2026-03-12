@@ -144,3 +144,8 @@ def feature_target(df: pd.DataFrame, target: str) -> tuple:
     y = df[target]
     X = df.drop(columns=[target])
     return X, y
+
+if __name__ == "__main__":
+    df_result = preprocess_split(df)
+    df_result.to_csv('raw_data/methane_data_processed.csv', index=False)
+    print("Fichier sauvegardé !")

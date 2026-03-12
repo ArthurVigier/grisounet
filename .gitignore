@@ -5,3 +5,4 @@ raw_data/
 *.pptx
 *Zone*
 *__pyc*
+*.DS*
