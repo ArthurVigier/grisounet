@@ -10,7 +10,6 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, LSTM, Input
 import tensorflow as tf
 
-
 catch22_feature_names = [
     "DN_HistogramMode_5",
     "DN_HistogramMode_10",
@@ -148,6 +147,9 @@ def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
     print(f"Reshaped X_train shape (LSTM): {X_train_reshaped.shape}")
     print(f"Reshaped X_test shape (LSTM): {X_test_reshaped.shape}")
 
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import Dense, LSTM, Input
+    import tensorflow as tf
 
     def pinball_loss_keras(y_true, y_pred, quantile=0.5):
         error = y_true - y_pred
