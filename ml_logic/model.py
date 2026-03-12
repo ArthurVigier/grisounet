@@ -158,3 +158,5 @@ def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
     print("Pinball Loss (q=0.5):", pinball)
     print("MAE:", mae)
     print("RMSE:", rmse)
+
+    return model
