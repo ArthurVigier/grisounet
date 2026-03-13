@@ -73,11 +73,13 @@ Cette hétérogénéité montre qu’il **n’existe pas un seuil unique applica
 La compréhension métier retenue à ce stade est la suivante :
 
 - le cisailleur extrait le charbon et se déplace selon des phases de travail et de retour ;
-- son activité influence les conditions locales de production et peut contribuer à la libération de méthane ;
+- son activité peut contribuer à la libération de méthane contenu dans les couches de charbon lors de l'extraction.
 - les capteurs environnementaux surveillent en continu l’état de la zone ;
 - lorsque certaines conditions sont atteintes, le système de sécurité peut déclencher une alerte ou une mise hors service de la machine.
 
 Dans ce cadre, **l’objectif du projet n’est pas de prédire une explosion** ni de remplacer le système de sécurité existant.
+
+Le seuil de 1 % correspond à un seuil opérationnel de vigilance, bien inférieur aux concentrations associées à un risque d’inflammation du méthane.
 
 L’objectif est de :
 
@@ -98,4 +100,8 @@ La documentation du dataset précise qu’une version transformée des données 
 - pour les capteurs `MM263`, `MM264` et `MM256`, le label est positionné à `warning` si :
 
 ```text
-max(MM(t181), ..., MM(t360)) ≥ 1.0
+max(MM263(t), MM264(t), MM256(t)) ≥ 1.0
+
+Dans ce projet, un événement est défini comme une période continue
+pendant laquelle au moins un des capteurs critiques dépasse
+le seuil de 1 % de méthane.
