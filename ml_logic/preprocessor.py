@@ -16,9 +16,11 @@ def load_data_local() -> pd.DataFrame:
 
 
 def preprocess_split(df: pd.DataFrame, test_size: float =0.3, alert_rate : float =1.0) -> tuple:
-    """ Preprocess function --> datetime / a single current intensity feature / train_test split / scaled values
-        takes as input a DataFrame and a test_size (defaulting to 0.3 when no test_size argument is passed)
-        returns a tuple containing two scaled dateasets : train_data and test_data """
+    """ Preprocess function --> datetime / a single current intensity feature / train_test split / scaled values.
+        Takes as input a DataFrame and a test_size (defaulting to 0.3 when no test_size argument is passed).
+        Applies a MinMax scaler to each feature column and stores the corresponding scaler in a dictionary of scalers.
+        The dictionary is needed to be able to inverse_transform each column with its own scaler later on.
+        The function returns a tuple containing two scaled dateasets (train_data and test_data) AND a dictionary of scalers."""
 
     # Create a copy of the initial DataFrame before editing it
     df = df.copy()
@@ -39,14 +41,17 @@ def preprocess_split(df: pd.DataFrame, test_size: float =0.3, alert_rate : float
     train_data, test_data = train_test_split(df, test_size=test_size, shuffle=False)
 
     # Scale numerical features without data leakage
-    features_to_scale = ['AN311', 'AN422', 'AN423', 'TP1721', 'RH1722', 'BA1723', 'TP1711', 'RH1712', 'BA1713', 'MM252', 'MM261', 'MM262', 'MM263',\
-                     'MM264', 'MM256', 'MM211', 'CM861','CR863', 'P_864', 'TC862', 'WM868', 'AMP_AVG', 'F_SIDE', 'V']
-    mm_scaler = MinMaxScaler()
+    # features_to_scale = ['AN311', 'AN422', 'AN423', 'TP1721', 'RH1722', 'BA1723', 'TP1711', 'RH1712', 'BA1713', 'MM252', 'MM261', 'MM262', 'MM263',\
+    #                  'MM264', 'MM256', 'MM211', 'CM861','CR863', 'P_864', 'TC862', 'WM868', 'AMP_AVG', 'F_SIDE', 'V']
+    features_to_scale = train_data.select_dtypes(include='number')
+    scalers = {}
     for feature in features_to_scale :
+        mm_scaler = MinMaxScaler()
         train_data[feature] = mm_scaler.fit_transform(train_data[[feature]])
         test_data[feature] =  mm_scaler.transform(test_data[[feature]])
+        scalers[feature] = mm_scaler
 
-    return train_data, test_data
+    return train_data, test_data, scalers
 
 # TO BE DONE: add new features (lagged variables for models other than SARIMA)
 
@@ -60,8 +65,11 @@ def slice_arrays(df: pd.DataFrame, start_index, stop_index, window_length_in_sec
     if input_length_in_sec <= 0:
         raise ValueError("window_length_in_sec must be > forecast_horizon_in_sec")
 
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("slice_arrays expects df.index to be a DatetimeIndex")
+
     # Creates subset to limit training time initially
-    subset_df = df.[start_time:stop_time]
+    subset_df = df.iloc[start_index:stop_index]
 
     # Define columns to be included in X and y - eliminating columns not required for modelling
     excluded_cols = ['datetime', 'slice_id', 'trigger_time', 't_rel_s', 'ALERT']
