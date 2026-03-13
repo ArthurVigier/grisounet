@@ -7,8 +7,10 @@ import pandas as pd
 from sklearn.metrics import make_scorer
 from ml_logic.preprocessor import load_data_local , preprocess_split, sample_datasets,feature_target
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, LSTM, Input
-import tensorflow as tf
+from tensorflow.keras.layers import Dense, LSTM, Input,TimeDistributed
+from tensorflow.keras.models import Sequential
+ # Import TimeDistributed
+
 
 catch22_feature_names = [
     "DN_HistogramMode_5",
@@ -165,3 +167,21 @@ def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
     y_pred = model.predict(X_test_reshaped)
 
     return model , y_test , y_pred
+
+def more_advanced_lstm(X,y,X_test,y_test):
+
+    def pinball_loss_keras(y_true, y_pred, quantile=0.5):
+        error = y_true - y_pred
+        return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
+
+    model = Sequential()
+    model.add(LSTM(units=64, return_sequences=True, input_shape=(X.shape[1], X.shape[2]))) # Add return_sequences=True
+    model.add(LSTM(units=64, return_sequences=True, input_shape=(X.shape[1], X.shape[2])))
+    model.add(LSTM(units=64, return_sequences=True, input_shape=(X.shape[1], X.shape[2])))
+    model.add(TimeDistributed(Dense(y.shape[2]))) # Wrap Dense in TimeDistributed
+    model.compile(optimizer='adam', loss=lambda y_true, y_pred: pinball_loss_keras(y_true, y_pred, quantile=0.5))
+    history = model.fit(X, y, epochs=40, batch_size=32, validation_split=0.2)
+    y_pred = model.predict(X_test)
+    score = model.evaluate(X_test, y_test)
+    print(f"Test loss: {score}")
+    return model
