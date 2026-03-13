@@ -26,7 +26,7 @@ flatten:
 	fi
 
 load_data_local:
-  python -c "from ml_logic.preprocessor import load_data_local; load_data_local()"
+	python -c "from ml_logic.preprocessor import load_data_local; load_data_local()"
 
 preprocess_split:
 	python -c "from ml_logic.preprocessor import preprocess_split; preprocess_split()"
