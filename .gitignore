@@ -1,5 +1,8 @@
 raw_data/
+.env
 *.ipynb
-media/videos/mine_sequences/480p15
-animations
-media
+.python-version
+*.pptx
+*Zone*
+*__pyc*
+*.DS*
