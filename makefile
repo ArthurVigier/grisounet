@@ -1,6 +1,6 @@
 RAW_DIR := raw_data
 
-.PHONY: data lfs unzip flatten
+.PHONY: data lfs unzip flatten preprocess_split slice_arrays
 
 data: lfs unzip flatten
 
@@ -24,3 +24,12 @@ flatten:
 		echo "Suppression du dossier intermédiaire"; \
 		rm -rf "$$(dirname "$$csv")"; \
 	fi
+
+load_data_local:
+  python -c "from ml_logic.preprocessor import load_data_local; load_data_local()"
+
+preprocess_split:
+	python -c "from ml_logic.preprocessor import preprocess_split; preprocess_split()"
+
+slice_arrays:
+	python -c "from ml_logic.preprocessor import slice_arrays; slice_arrays()"
