@@ -50,8 +50,8 @@ def preprocess_split(df: pd.DataFrame, test_size: float =0.3, alert_rate : float
 
 # TO BE DONE: add new features (lagged variables for models other than SARIMA)
 
-def slice_arrays(df: pd.DataFrame, start_time, stop_time, window_length_in_sec: int =360, forecast_horizon_in_sec: int =180) -> tuple :
-    ''' creates a subset of the input dataframe - the observations between start_time and stop_time (excluded),
+def slice_arrays(df: pd.DataFrame, start_index, stop_index, window_length_in_sec: int =360, forecast_horizon_in_sec: int =180) -> tuple :
+    ''' creates a subset of the input dataframe - the observations between start_index and stop_index (excluded),
         prepares dataframe slices containing observations exceeding the alert_rate passed to function prerocess_split,
         the shape of the slices is governed by arguments window_length_in_sec and forecast_horizon_in_sec,
         returns a tuple of tensors '''
@@ -61,7 +61,7 @@ def slice_arrays(df: pd.DataFrame, start_time, stop_time, window_length_in_sec: 
         raise ValueError("window_length_in_sec must be > forecast_horizon_in_sec")
 
     # Creates subset to limit training time initially
-    subset_df = df.iloc[start_time:stop_time]
+    subset_df = df.[start_time:stop_time]
 
     # Define columns to be included in X and y - eliminating columns not required for modelling
     excluded_cols = ['datetime', 'slice_id', 'trigger_time', 't_rel_s', 'ALERT']
