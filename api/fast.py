@@ -31,7 +31,7 @@ def preprocess(start_index,stop_index):
 @app.get("/train_and_test_model")
 def train_and_test_model(X_train,y_train,X_test,y_test):      # 1
     """
-    Train the model from the preprocessing function data , then make a predict
+    Train the model from the preprocessing function data
     """
     model , history,y_pred = more_advanced_lstm(X_train,y_train,X_test,y_test)
     assert model is not None
