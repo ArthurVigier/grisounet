@@ -192,7 +192,7 @@ def more_advanced_lstm(X_train,y_train,X_test,y_test):
     return model , history,y_pred
 
 def conv1d_simpl(X_train,y_train,X_test,y_test):
-  #best model as of today
+  #best model as of today , activation sigmoid could seem strange but it worked better in the test
   model = Sequential()
   # Encoder part (Dilated Conv1D layers)
   model.add(Input(shape=(X_train.shape[1], X_train.shape[2])))
