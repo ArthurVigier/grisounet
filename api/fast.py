@@ -20,7 +20,7 @@ def preprocess():
     train_data, test_data, scalers = preprocess_split(df)
     X_train , y_train = slice_arrays(train_data)
     X_test, y_test = slice_arrays(test_data)
-    return X_train,y_train
+    return X_train,y_train,X_test,y_test
 
 
 # http://127.0.0.1:8000/predict?pickup_datetime=2014-07-06+19:18:00&pickup_longitude=-73.950655&pickup_latitude=40.783282&dropoff_longitude=-73.984365&dropoff_latitude=40.769802&passenger_count=2
