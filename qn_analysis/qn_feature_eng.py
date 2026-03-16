@@ -81,7 +81,7 @@ def create_summary(df_events, captor):
         end_time=("datetime", "max"),
         duration=("datetime", lambda x: (x.max() - x.min()).total_seconds()),
         max_captor=(captor, "max"),
-        mean_captor=(captor, "mean")
+        mean_captor=(captor, "mean"),
         num_measurements=("datetime", "count")
     ).reset_index()
     return summary
