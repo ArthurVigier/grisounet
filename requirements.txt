@@ -146,3 +146,4 @@ zict==3.0.0
 statsmodels==0.14.1
 keras
 tensorflow
+fastapi
