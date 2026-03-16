@@ -9,6 +9,7 @@ from ml_logic.preprocessor import load_data_local , preprocess_split, sample_dat
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, LSTM, Input,TimeDistributed, RepeatVector, Conv1D, Flatten
 from tensorflow.keras.models import Sequential
+from ml_logic.results_bq_save import save_history_to_bq,save_predictions_to_bq
  # Import TimeDistributed
 import tensorflow as tf
 
@@ -165,6 +166,8 @@ def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
     model.compile(optimizer='adam', loss=lambda y_true, y_pred: pinball_loss_keras(y_true, y_pred, quantile=0.5))
     model.fit(X_train_reshaped, y_train, epochs=10, batch_size=32, validation_split=0.2)
     y_pred = model.predict(X_test_reshaped)
+    save_history_to_bq(history)
+    save_predictions_to_bq(y_test, y_pred)
 
     return model , y_test , y_pred
 
@@ -189,6 +192,8 @@ def more_advanced_lstm(X_train,y_train,X_test,y_test):
     y_pred = model.predict(X_test)
     score = model.evaluate(X_test, y_test)
     print(f"Test loss: {score}")
+    save_history_to_bq(history)
+    save_predictions_to_bq(y_test, y_pred)
     return model , history,y_pred
 
 def conv1d_simpl(X_train,y_train,X_test,y_test):
@@ -214,4 +219,7 @@ def conv1d_simpl(X_train,y_train,X_test,y_test):
   y_pred = model.predict(X_test)
   score = model.evaluate(X_test, y_test)
   print(f"Test loss: {score}")
+  save_history_to_bq(history)
+  save_predictions_to_bq(y_test, y_pred)
+
   return model , history,y_pred
