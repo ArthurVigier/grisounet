@@ -2,6 +2,9 @@
 import os
 from datetime import datetime
 from google.cloud import storage
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def save_model_to_gcs(model, timestamp=None):

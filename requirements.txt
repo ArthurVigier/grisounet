@@ -147,3 +147,7 @@ statsmodels==0.14.1
 keras
 tensorflow
 fastapi
+google-cloud-bigquery
+google-cloud-storage
+aeon
+python-dotenv

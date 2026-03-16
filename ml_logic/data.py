@@ -3,6 +3,9 @@ import os
 from datetime import datetime
 from google.cloud import bigquery
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def pull_data_from_bq():

@@ -4,6 +4,9 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 from google.cloud import bigquery
+from dotenv import load_dotenv
+
+load_dotenv()
 
 SENSORS = ["MM256", "MM263", "MM264"]
 
