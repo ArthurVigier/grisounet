@@ -15,11 +15,15 @@ app.add_middleware(
 )
 
 @app.get("/preprocess")
-def preprocess():
+def preprocess(start_index,stop_index):
+    """
+    Preprocess step , please keep in mind that you must precise which index you want to use
+    index work in datetime format only between 2014-03-02 00:00:00 and 2014-05-15 13:52:30
+    """
     df = load_data_local()
     train_data, test_data, scalers = preprocess_split(df)
-    X_train , y_train = slice_arrays(train_data)
-    X_test, y_test = slice_arrays(test_data)
+    X_train , y_train = slice_arrays(train_data,start_index,stop_index)
+    X_test, y_test = slice_arrays(test_data,start_index,stop_index)
     return X_train,y_train,X_test,y_test
 
 
