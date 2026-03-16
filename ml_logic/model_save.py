@@ -2,14 +2,12 @@
 import os
 from datetime import datetime
 from google.cloud import storage
-from dotenv import load_dotenv
-
-load_dotenv()
+from ml_logic.secrets import get_secret
 
 
 def save_model_to_gcs(model, timestamp=None):
     """Save Keras model to Cloud Storage bucket."""
-    bucket_name = os.environ.get("BUCKET_NAME")
+    bucket_name = get_secret("BUCKET_NAME")
     if not timestamp:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -32,7 +30,7 @@ def load_model_from_gcs(timestamp):
     """Load a specific model version from Cloud Storage."""
     from tensorflow.keras.models import load_model
 
-    bucket_name = os.environ.get("BUCKET_NAME")
+    bucket_name = get_secret("BUCKET_NAME")
     local_path = f"results/models/model_{timestamp}.keras"
 
     client = storage.Client()

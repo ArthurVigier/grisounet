@@ -3,23 +3,21 @@ import os
 from datetime import datetime
 from google.cloud import bigquery
 import pandas as pd
-from dotenv import load_dotenv
-
-load_dotenv()
+from ml_logic.secrets import get_secret
 
 
 def pull_data_from_bq():
     """
-    Pulls full dataset from BigQuery using .env variables.
+    Pulls full dataset from BigQuery using Secret Manager / .env variables.
     Returns DataFrame and saves timestamped CSV locally.
     """
-    project = os.environ.get("GCP_PROJECT")
-    dataset = os.environ.get("BQ_DATASET")
-    table = os.environ.get("BQ_TABLE")
+    project = get_secret("GCP_PROJECT")
+    dataset = get_secret("BQ_DATASET")
+    table = get_secret("BQ_TABLE")
+    region = get_secret("BQ_REGION")
 
     query = f"SELECT * FROM `{project}.{dataset}.{table}`"
 
-    region = os.environ.get("BQ_REGION")
     client = bigquery.Client(project=project, location=region)
     df = client.query(query).result().to_dataframe()
 
@@ -37,8 +35,9 @@ def save_preprocessing_to_bq(X_train, X_test, y_train, y_test):
     """
     Saves preprocessing results to a timestamped BigQuery table.
     """
-    project = os.environ.get("GCP_PROJECT")
-    dataset = os.environ.get("BQ_DATASET")
+    project = get_secret("GCP_PROJECT")
+    dataset = get_secret("BQ_DATASET")
+    region = get_secret("BQ_REGION")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     table_name = f"preprocess_{timestamp}"
 
@@ -49,7 +48,6 @@ def save_preprocessing_to_bq(X_train, X_test, y_train, y_test):
     test_df["split"] = "test"
     result_df = pd.concat([train_df, test_df], ignore_index=True)
 
-    region = os.environ.get("BQ_REGION")
     client = bigquery.Client(project=project, location=region)
     table_ref = f"{project}.{dataset}.{table_name}"
     client.load_table_from_dataframe(result_df, table_ref).result()

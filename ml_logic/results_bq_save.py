@@ -4,17 +4,16 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 from google.cloud import bigquery
-from dotenv import load_dotenv
-
-load_dotenv()
+from ml_logic.secrets import get_secret
 
 SENSORS = ["MM256", "MM263", "MM264"]
 
 
 def save_history_to_bq(history, timestamp=None):
     """Save training history (loss per epoch) to indexed BQ table."""
-    project = os.environ.get("GCP_PROJECT")
-    dataset = os.environ.get("BQ_DATASET")
+    project = get_secret("GCP_PROJECT")
+    dataset = get_secret("BQ_DATASET")
+    region = get_secret("BQ_REGION")
     if not timestamp:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -22,7 +21,6 @@ def save_history_to_bq(history, timestamp=None):
     history_df["epoch"] = range(1, len(history_df) + 1)
     history_df["run_timestamp"] = timestamp
 
-    region = os.environ.get("BQ_REGION")
     table_ref = f"{project}.{dataset}.history_{timestamp}"
     client = bigquery.Client(project=project, location=region)
     client.load_table_from_dataframe(history_df, table_ref).result()
@@ -42,8 +40,9 @@ def save_predictions_to_bq(y_test, y_pred, timestamp=None):
     y_test: shape (n_samples, horizon, 3) -- actual values
     y_pred: shape (n_samples, horizon, 3) -- predicted values
     """
-    project = os.environ.get("GCP_PROJECT")
-    dataset = os.environ.get("BQ_DATASET")
+    project = get_secret("GCP_PROJECT")
+    dataset = get_secret("BQ_DATASET")
+    region = get_secret("BQ_REGION")
     if not timestamp:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -64,7 +63,6 @@ def save_predictions_to_bq(y_test, y_pred, timestamp=None):
     pred_df = pd.DataFrame(rows)
     pred_df["run_timestamp"] = timestamp
 
-    region = os.environ.get("BQ_REGION")
     table_ref = f"{project}.{dataset}.predictions_{timestamp}"
     client = bigquery.Client(project=project, location=region)
     client.load_table_from_dataframe(pred_df, table_ref).result()
