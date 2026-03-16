@@ -151,3 +151,4 @@ google-cloud-bigquery
 google-cloud-storage
 aeon
 python-dotenv
+google-cloud-secret-manager
