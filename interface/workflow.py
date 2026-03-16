@@ -2,7 +2,7 @@
 import os
 from datetime import datetime
 from dotenv import load_dotenv
-
+import matplotlib.pyplot as plt
 load_dotenv()
 
 
@@ -59,8 +59,23 @@ def run_pipeline(start_index=0, stop_index=100000):
     # Step 5: Analyses
     print("\nStep 5/5 -- Generating analysis...")
     # todo: add more analysis functions here and save results to BQ or GCS as needed
+    plt.plot(history.history['loss'])
+    plt.plot(history.history['val_loss'])
     # plot_loss_curves
     # plot_predictions_vs_actual
+    sample_idx = 4000
+    target_cols = ["MM256", "MM263", "MM264"]
+
+    for target_idx, target_name in enumerate(target_cols):
+        plt.figure(figsize=(12, 5))
+        plt.plot(y_test[sample_idx, :, target_idx], label="Actual", linewidth=2)
+        plt.plot(y_pred[sample_idx, :, target_idx], label="LSTM", linestyle=":")
+        plt.title(f"{target_name} - sample {sample_idx}")
+        plt.xlabel("Forecast step")
+        plt.ylabel("Methane rate")
+        plt.legend()
+        plt.show()
+
     # compute_metrics(pred_df, timestamp)
 
     print(f"\n{'='*50}")
