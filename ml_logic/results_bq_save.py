@@ -22,8 +22,9 @@ def save_history_to_bq(history, timestamp=None):
     history_df["epoch"] = range(1, len(history_df) + 1)
     history_df["run_timestamp"] = timestamp
 
+    region = os.environ.get("BQ_REGION")
     table_ref = f"{project}.{dataset}.history_{timestamp}"
-    client = bigquery.Client(project=project)
+    client = bigquery.Client(project=project, location=region)
     client.load_table_from_dataframe(history_df, table_ref).result()
 
     # Also save locally
@@ -63,8 +64,9 @@ def save_predictions_to_bq(y_test, y_pred, timestamp=None):
     pred_df = pd.DataFrame(rows)
     pred_df["run_timestamp"] = timestamp
 
+    region = os.environ.get("BQ_REGION")
     table_ref = f"{project}.{dataset}.predictions_{timestamp}"
-    client = bigquery.Client(project=project)
+    client = bigquery.Client(project=project, location=region)
     client.load_table_from_dataframe(pred_df, table_ref).result()
 
     # Also save locally

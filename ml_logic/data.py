@@ -19,7 +19,8 @@ def pull_data_from_bq():
 
     query = f"SELECT * FROM `{project}.{dataset}.{table}`"
 
-    client = bigquery.Client(project=project)
+    region = os.environ.get("BQ_REGION")
+    client = bigquery.Client(project=project, location=region)
     df = client.query(query).result().to_dataframe()
 
     # Save timestamped copy locally
@@ -48,7 +49,8 @@ def save_preprocessing_to_bq(X_train, X_test, y_train, y_test):
     test_df["split"] = "test"
     result_df = pd.concat([train_df, test_df], ignore_index=True)
 
-    client = bigquery.Client(project=project)
+    region = os.environ.get("BQ_REGION")
+    client = bigquery.Client(project=project, location=region)
     table_ref = f"{project}.{dataset}.{table_name}"
     client.load_table_from_dataframe(result_df, table_ref).result()
 
