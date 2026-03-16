@@ -7,7 +7,7 @@ import pandas as pd
 from sklearn.metrics import make_scorer
 from ml_logic.preprocessor import load_data_local , preprocess_split, sample_datasets,feature_target
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, LSTM, Input,TimeDistributed
+from tensorflow.keras.layers import Dense, LSTM, Input,TimeDistributed, RepeatVector
 from tensorflow.keras.models import Sequential
  # Import TimeDistributed
 import tensorflow as tf
@@ -175,11 +175,16 @@ def more_advanced_lstm(X_train,y_train,X_test,y_test):
         return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
 
     model = Sequential()
-    model.add(LSTM(units=64, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2]))) # Add return_sequences=True
+    # Encoder part
     model.add(LSTM(units=64, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])))
-    model.add(LSTM(units=64, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])))
-    model.add(TimeDistributed(Dense(y_train.shape[2]))) # Wrap Dense in TimeDistributed
-    model.compile(optimizer='adam', loss=lambda y_true, y_pred: pinball_loss_keras(y_true, y_pred, quantile=0.5))
+    model.add(LSTM(units=64, return_sequences=False)) # Last encoder LSTM should not return sequences
+
+    # Decoder part
+    model.add(RepeatVector(y_train.shape[1])) # Repeat the context vector to match target sequence length (60)
+    model.add(LSTM(units=64, return_sequences=True)) # Decoder LSTM(s) to process the repeated vector
+    model.add(TimeDistributed(Dense(y_train.shape[2]))) # Output layer for each timestep
+
+    model.compile(optimizer='adam', loss=lambda y_true, y_pred: pinball_loss_keras(y_true, y_pred, quantile=0.9))
     history = model.fit(X_train, y_train, epochs=40, batch_size=32, validation_split=0.2)
     y_pred = model.predict(X_test)
     score = model.evaluate(X_test, y_test)
