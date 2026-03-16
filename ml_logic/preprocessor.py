@@ -1,5 +1,7 @@
 # Data pre-processing
 
+import gc
+
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
@@ -85,45 +87,47 @@ def slice_arrays(df: pd.DataFrame, start_index, stop_index, window_length_in_sec
         y_empty = np.empty((0, forecast_horizon_in_sec, len(target_cols)), dtype=np.float32)
         return X_empty, y_empty
 
-    # Create a DataFrame of slices with length window_length_in_second and forecast_horizon_in sec after trigger time
-    # the DataFrame includes columns indicating slice_id, trigger_time on which the window is 'focused', and time relative of the observation vs the trigger
-    slices = []
+    # Pull the sequences directly into NumPy arrays to avoid the large
+    # intermediate DataFrames created by repeated copy/concat operations.
+    subset_index = subset_df.index
+    feature_values = subset_df.loc[:, feature_cols].to_numpy(copy=False)
+    target_values = subset_df.loc[:, target_cols].to_numpy(copy=False)
+    one_second = pd.Timedelta(seconds=1)
 
-    for i, t0 in enumerate(trigger_times, start=1):
-        start = t0 - pd.Timedelta(seconds=input_length_in_sec)
-        end = start + pd.Timedelta(seconds=window_length_in_sec + 1)
-        w = subset_df[(subset_df.index >= start) & (subset_df.index < end)].copy()
-        w['slice_id'] = i
-        w['trigger_time'] = t0
-        w['t_rel_s'] = (w.index - t0).total_seconds().astype(int)
-        slices.append(w)
-    data_slices = pd.concat(slices).reset_index(names='datetime')
+    X, y = [], []
+    for t0 in trigger_times:
+        X_times = pd.date_range(end=t0, periods=input_length_in_sec + 1, freq='s')
+        y_times = pd.date_range(start=t0 + one_second, periods=forecast_horizon_in_sec, freq='s')
 
-    # From data_slices, generate arrays for an LSTM model
-    wip_df = data_slices.sort_values(['slice_id', 'datetime']).copy()
-    X_df = wip_df[(wip_df['t_rel_s'] >= -input_length_in_sec) & (wip_df['t_rel_s'] <= 0)]
-    y_df = wip_df[(wip_df['t_rel_s'] >= 1) & (wip_df['t_rel_s'] <= forecast_horizon_in_sec)]
+        X_idx = subset_index.get_indexer(X_times)
+        y_idx = subset_index.get_indexer(y_times)
 
-    # Only select full-length slices
-    good_X = X_df.groupby('slice_id').size()
-    good_y = y_df.groupby('slice_id').size()
-    good_ids = good_X[good_X == input_length_in_sec + 1].index.intersection(
-        good_y[good_y == forecast_horizon_in_sec].index)
+        if (X_idx < 0).any() or (y_idx < 0).any():
+            continue
 
-    if len(good_ids) == 0:
+        X.append(np.asarray(feature_values[X_idx], dtype=np.float32))
+        y.append(np.asarray(target_values[y_idx], dtype=np.float32))
+
+    del feature_values
+    del target_values
+    del trigger_mask
+    del trigger_times
+    del subset_df
+
+    if not X:
         X_empty = np.empty((0, input_length_in_sec +1, len(feature_cols)), dtype=np.float32)
         y_empty = np.empty((0, forecast_horizon_in_sec, len(target_cols)), dtype=np.float32)
+        gc.collect()
         return X_empty, y_empty
 
-    # Stack arrays to create tensors
-    X, y = [], []
-    for sid in good_ids:
-        X_seq = X_df.loc[(X_df['slice_id'] == sid), feature_cols].to_numpy(dtype=np.float32)
-        y_seq = y_df.loc[(y_df['slice_id'] == sid), target_cols].to_numpy(dtype=np.float32)
-        X.append(X_seq)
-        y.append(y_seq)
+    X_array = np.stack(X)
+    y_array = np.stack(y)
 
-    return np.stack(X), np.stack(y)
+    del X
+    del y
+    gc.collect()
+
+    return X_array, y_array
 
 
 def sample_datasets(df_scaled: pd.DataFrame) -> list :
