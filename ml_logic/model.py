@@ -7,7 +7,7 @@ import pandas as pd
 from sklearn.metrics import make_scorer
 from ml_logic.preprocessor import load_data_local , preprocess_split, sample_datasets,feature_target
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, LSTM, Input,TimeDistributed, RepeatVector
+from tensorflow.keras.layers import Dense, LSTM, Input,TimeDistributed, RepeatVector, Conv1D, Flatten
 from tensorflow.keras.models import Sequential
  # Import TimeDistributed
 import tensorflow as tf
@@ -190,3 +190,28 @@ def more_advanced_lstm(X_train,y_train,X_test,y_test):
     score = model.evaluate(X_test, y_test)
     print(f"Test loss: {score}")
     return model , history,y_pred
+
+def conv1d_simpl(X_train,y_train,X_test,y_test):
+  #best model as of today
+  model = Sequential()
+  # Encoder part (Dilated Conv1D layers)
+  model.add(Input(shape=(X_train.shape[1], X_train.shape[2])))
+  model.add(Conv1D(filters=4, kernel_size=3, dilation_rate=2, activation='sigmoid', padding='same')) # Use padding='same' to maintain length or adjust
+  model.add(Conv1D(filters=4, kernel_size=3, dilation_rate=8, activation='sigmoid', padding='same')) # Use padding='same'
+  model.add(Flatten()) # Flatten to create a context vector
+
+  # Decoder part
+  model.add(RepeatVector(y_train.shape[1])) # Repeat the context vector to match target sequence length (60)
+  model.add(LSTM(units=4, return_sequences=True)) # Decoder LSTM to process the repeated vector
+  model.add(TimeDistributed(Dense(y_train.shape[2]))) # Output layer for each timestep
+
+  def pinball_loss_keras(y_true, y_pred, quantile=0.5):
+        error = y_true - y_pred
+        return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
+  model.compile(optimizer='adam', loss=lambda y_true, y_pred: pinball_loss_keras(y_true, y_pred, quantile=0.9))
+  es = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+  history = model.fit(X_train, y_train, epochs=500, batch_size=32, validation_split=0.2,callbacks=[es])
+  y_pred = model.predict(X_test)
+  score = model.evaluate(X_test, y_test)
+  print(f"Test loss: {score}")
+  return model , history,y_pred
