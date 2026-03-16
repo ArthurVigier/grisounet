@@ -168,20 +168,20 @@ def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
 
     return model , y_test , y_pred
 
-def more_advanced_lstm(X,y,X_test,y_test):
+def more_advanced_lstm(X_train,y_train,X_test,y_test):
 
     def pinball_loss_keras(y_true, y_pred, quantile=0.5):
         error = y_true - y_pred
         return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
 
     model = Sequential()
-    model.add(LSTM(units=64, return_sequences=True, input_shape=(X.shape[1], X.shape[2]))) # Add return_sequences=True
-    model.add(LSTM(units=64, return_sequences=True, input_shape=(X.shape[1], X.shape[2])))
-    model.add(LSTM(units=64, return_sequences=True, input_shape=(X.shape[1], X.shape[2])))
-    model.add(TimeDistributed(Dense(y.shape[2]))) # Wrap Dense in TimeDistributed
+    model.add(LSTM(units=64, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2]))) # Add return_sequences=True
+    model.add(LSTM(units=64, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])))
+    model.add(LSTM(units=64, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])))
+    model.add(TimeDistributed(Dense(y_train.shape[2]))) # Wrap Dense in TimeDistributed
     model.compile(optimizer='adam', loss=lambda y_true, y_pred: pinball_loss_keras(y_true, y_pred, quantile=0.5))
-    history = model.fit(X, y, epochs=40, batch_size=32, validation_split=0.2)
+    history = model.fit(X_train, y_train, epochs=40, batch_size=32, validation_split=0.2)
     y_pred = model.predict(X_test)
     score = model.evaluate(X_test, y_test)
     print(f"Test loss: {score}")
-    return model
+    return model , history,y_pred
