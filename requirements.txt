@@ -144,3 +144,5 @@ websocket-client==1.9.0
 xgboost==3.2.0
 zict==3.0.0
 statsmodels==0.14.1
+keras
+tensorflow
