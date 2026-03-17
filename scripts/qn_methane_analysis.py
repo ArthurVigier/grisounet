@@ -30,8 +30,8 @@ CSV_PATH = os.path.join(RAW_DATA_DIR, "methane_data.csv")
 OUTPUT_DIR = os.path.join(ANALYSIS_DIR, "processed_data")
 PLOTS_DIR = os.path.join(ANALYSIS_DIR, "plots")
 
-# Target methane sensors (from attribute_information.txt)
-TARGET_SENSORS = ["MM256", "MM263", "MM264"]
+# All methane sensors (from attribute_information.txt)
+ALL_METHANE_SENSORS = ["MM252", "MM261", "MM262", "MM263", "MM264", "MM256", "MM211", "CM861"]
 
 
 # ---------------------------------------------------------------------------
@@ -257,18 +257,69 @@ def plot_daily_event_heatmap(df_events: pd.DataFrame, summary: pd.DataFrame, sen
 
 
 # ---------------------------------------------------------------------------
-# 8. BigQuery push
+# 8. Build consolidated cross-sensor table
 # ---------------------------------------------------------------------------
-def push_to_bigquery(event_summary: pd.DataFrame, day_event_map: pd.DataFrame):
-    """Push event summary and day-event map to BigQuery."""
+def build_consolidated_table(
+    all_summaries: dict[str, pd.DataFrame],
+    all_day_maps: dict[str, pd.DataFrame],
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Build a consolidated event summary and day-event map across all sensors.
+
+    Event summary: one row per (sensor, event_id) with columns prefixed by sensor.
+    Consolidated day table: one row per date, with event_id_<sensor> and day_id_<sensor> columns.
+    """
+    # --- Consolidated event summary (long format with sensor column) ---
+    parts = []
+    for sensor, summary in all_summaries.items():
+        s = summary.copy()
+        s["sensor"] = sensor
+        s.rename(columns={"event_id": f"event_id_{sensor}"}, inplace=True)
+        parts.append(s)
+    consolidated_events = pd.concat(parts, ignore_index=True)
+
+    # --- Consolidated day table (wide format: one row per date) ---
+    # Get all unique dates from the dataset
+    all_dates = sorted(
+        set().union(*(dm["date"].unique() for dm in all_day_maps.values()))
+    )
+    day_rows = []
+    for date in all_dates:
+        row = {"date": date}
+        # Find the day_nb_ind for this date from any sensor that has it
+        for sensor, dm in all_day_maps.items():
+            match = dm[dm["date"] == date]
+            if not match.empty:
+                row["day_nb_ind"] = match["day_nb_ind"].iloc[0]
+                break
+        for sensor, dm in all_day_maps.items():
+            match = dm[dm["date"] == date]
+            if not match.empty:
+                # List of event IDs for this sensor on this date
+                event_ids = sorted(int(x) for x in match["event_id"].unique())
+                row[f"event_id_{sensor}"] = str(event_ids)
+                row[f"n_events_{sensor}"] = len(event_ids)
+            else:
+                row[f"event_id_{sensor}"] = "[]"
+                row[f"n_events_{sensor}"] = 0
+        day_rows.append(row)
+    consolidated_days = pd.DataFrame(day_rows)
+
+    return consolidated_events, consolidated_days
+
+
+# ---------------------------------------------------------------------------
+# 9. BigQuery push
+# ---------------------------------------------------------------------------
+def _get_bq_client():
+    """Return a BigQuery client using .env credentials."""
     from dotenv import load_dotenv
     from google.cloud import bigquery
 
-    # Load .env — try git root first, then walk up from script dir
-    project_root = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", ".."))
+    project_root = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
     env_path = os.path.join(project_root, ".env")
     if not os.path.exists(env_path):
-        # In a worktree — find main repo .env
         import subprocess
         main_root = subprocess.check_output(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -280,37 +331,120 @@ def push_to_bigquery(event_summary: pd.DataFrame, day_event_map: pd.DataFrame):
     project = os.environ["GCP_PROJECT"]
     dataset = os.environ["BQ_DATASET"]
     region = os.environ["BQ_REGION"]
-
     client = bigquery.Client(project=project, location=region)
+    return client, project, dataset
+
+
+def push_to_bigquery(event_summary: pd.DataFrame, day_event_map: pd.DataFrame,
+                     table_suffix: str = ""):
+    """Push event summary and day-event map to BigQuery for a single sensor."""
+    from google.cloud import bigquery
+
+    client, project, dataset = _get_bq_client()
+    suffix = f"_{table_suffix}" if table_suffix else ""
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
 
     # -- Event summary table --
-    table_events = f"{project}.{dataset}.methane_events_summary"
-    # Convert date columns to string for BQ compatibility
+    table_events = f"{project}.{dataset}.methane_events_summary{suffix}"
     es = event_summary.copy()
     es["start_time"] = es["start_time"].astype(str)
     es["end_time"] = es["end_time"].astype(str)
     es["date"] = es["date"].astype(str)
-
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-    job = client.load_table_from_dataframe(es, table_events, job_config=job_config)
-    job.result()
+    client.load_table_from_dataframe(es, table_events, job_config=job_config).result()
     print(f"  -> Pushed event summary ({len(es)} rows) to {table_events}")
 
     # -- Day-event map table --
-    table_days = f"{project}.{dataset}.methane_day_event_map"
+    table_days = f"{project}.{dataset}.methane_day_event_map{suffix}"
     dem = day_event_map.copy()
     dem["date"] = dem["date"].astype(str)
-
-    job = client.load_table_from_dataframe(dem, table_days, job_config=job_config)
-    job.result()
+    client.load_table_from_dataframe(dem, table_days, job_config=job_config).result()
     print(f"  -> Pushed day-event map ({len(dem)} rows) to {table_days}")
 
-    return table_events, table_days
+
+def push_consolidated_to_bigquery(consolidated_events: pd.DataFrame,
+                                  consolidated_days: pd.DataFrame):
+    """Push the cross-sensor consolidated tables to BigQuery."""
+    from google.cloud import bigquery
+
+    client, project, dataset = _get_bq_client()
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+
+    # -- Consolidated events (long format) --
+    table_ce = f"{project}.{dataset}.methane_events_all_sensors"
+    ce = consolidated_events.copy()
+    for col in ["start_time", "end_time"]:
+        if col in ce.columns:
+            ce[col] = ce[col].astype(str)
+    if "date" in ce.columns:
+        ce["date"] = ce["date"].astype(str)
+    client.load_table_from_dataframe(ce, table_ce, job_config=job_config).result()
+    print(f"  -> Pushed consolidated events ({len(ce)} rows) to {table_ce}")
+
+    # -- Consolidated day map (wide format) --
+    table_cd = f"{project}.{dataset}.methane_day_event_map_all_sensors"
+    cd = consolidated_days.copy()
+    if "date" in cd.columns:
+        cd["date"] = cd["date"].astype(str)
+    client.load_table_from_dataframe(cd, table_cd, job_config=job_config).result()
+    print(f"  -> Pushed consolidated day map ({len(cd)} rows) to {table_cd}")
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def run_single_sensor(df: pd.DataFrame, sensor: str, threshold: float,
+                      gap: int, push_bq: bool, skip_plots: bool = False):
+    """Run the full pipeline for a single sensor. Returns (summary, day_map) or None."""
+    print(f"\n{'='*60}")
+    print(f"Sensor: {sensor}, Threshold: {threshold}, Gap: {gap}s")
+    print(f"{'='*60}")
+
+    df_proc = preprocess(df, sensor, threshold)
+    df_events = filter_events(df_proc)
+    print(f"Event rows: {len(df_events):,} / {len(df):,} ({100*len(df_events)/len(df):.2f}%)")
+
+    if len(df_events) == 0:
+        print(f"No events detected for {sensor}. Skipping.")
+        return None, None
+
+    df_events = assign_event_ids(df_events, gap_threshold=gap)
+    n_events = df_events["event_id"].nunique()
+    print(f"Distinct events: {n_events}")
+
+    day_map = build_day_event_map(df_events)
+    print(f"Days with events: {day_map['day_nb_ind'].nunique()}")
+
+    summary = build_event_summary(df_events, sensor)
+
+    # Print top events
+    print(f"\n--- Top 5 events by duration ({sensor}) ---")
+    top5 = summary.nlargest(5, "duration_seconds")[
+        ["event_id", "date", "start_time", "end_time", "duration_seconds",
+         "max_concentration", "mean_concentration", "num_measurements"]
+    ]
+    print(top5.to_string(index=False))
+
+    # Save CSVs
+    summary.to_csv(os.path.join(OUTPUT_DIR, f"methane_events_summary_{sensor}.csv"), index=False)
+    day_map.to_csv(os.path.join(OUTPUT_DIR, f"methane_day_event_map_{sensor}.csv"), index=False)
+
+    # Plots
+    if not skip_plots:
+        print(f"Generating plots for {sensor}...")
+        plot_full_timeseries(df, sensor, threshold, PLOTS_DIR)
+        plot_event_durations(summary, sensor, PLOTS_DIR)
+        plot_event_max_concentration(summary, sensor, threshold, PLOTS_DIR)
+        plot_top_events(df, df_events, summary, sensor, threshold, PLOTS_DIR)
+        plot_daily_event_heatmap(df_events, summary, sensor, PLOTS_DIR)
+
+    # Per-sensor BQ push
+    if push_bq:
+        print(f"Pushing {sensor} tables to BigQuery...")
+        push_to_bigquery(summary, day_map, table_suffix=sensor)
+
+    return summary, day_map
+
+
 def main():
     parser = argparse.ArgumentParser(description="Methane event detection pipeline")
     parser.add_argument("--threshold", type=float, default=0.7,
@@ -319,8 +453,12 @@ def main():
                         help="Gap in seconds to split events (default: 120)")
     parser.add_argument("--sensor", type=str, default="MM264",
                         help="Target sensor column (default: MM264)")
+    parser.add_argument("--all-sensors", action="store_true",
+                        help="Run for all methane sensors")
     parser.add_argument("--push-bq", action="store_true",
                         help="Push results to BigQuery")
+    parser.add_argument("--skip-plots", action="store_true",
+                        help="Skip plot generation (faster)")
     parser.add_argument("--csv", type=str, default=CSV_PATH,
                         help="Path to methane CSV")
     args = parser.parse_args()
@@ -328,71 +466,51 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(PLOTS_DIR, exist_ok=True)
 
-    # Load
+    # Load data once
     df = load_data(args.csv)
 
-    # Preprocess
-    sensor = args.sensor
-    threshold = args.threshold
-    print(f"\nSensor: {sensor}, Threshold: {threshold}, Gap: {args.gap}s")
-    df = preprocess(df, sensor, threshold)
+    sensors = ALL_METHANE_SENSORS if args.all_sensors else [args.sensor]
 
-    # Filter events
-    df_events = filter_events(df)
-    print(f"Event rows: {len(df_events):,} / {len(df):,} ({100*len(df_events)/len(df):.2f}%)")
+    all_summaries = {}
+    all_day_maps = {}
 
-    if len(df_events) == 0:
-        print("No events detected. Try lowering the threshold.")
-        return
+    for sensor in sensors:
+        summary, day_map = run_single_sensor(
+            df, sensor, args.threshold, args.gap, args.push_bq, args.skip_plots
+        )
+        if summary is not None:
+            all_summaries[sensor] = summary
+            all_day_maps[sensor] = day_map
 
-    # Assign event IDs
-    df_events = assign_event_ids(df_events, gap_threshold=args.gap)
-    n_events = df_events["event_id"].nunique()
-    print(f"Distinct events: {n_events}")
+    # Build and save consolidated table when multiple sensors
+    if len(all_summaries) > 1:
+        print(f"\n{'='*60}")
+        print("Building consolidated cross-sensor tables")
+        print(f"{'='*60}")
 
-    # Day-event map
-    day_map = build_day_event_map(df_events)
-    print(f"Days with events: {day_map['day_nb_ind'].nunique()}")
+        consolidated_events, consolidated_days = build_consolidated_table(
+            all_summaries, all_day_maps, df
+        )
 
-    # Event summary
-    summary = build_event_summary(df_events, sensor)
+        # Save CSVs
+        ce_path = os.path.join(OUTPUT_DIR, "methane_events_all_sensors.csv")
+        consolidated_events.to_csv(ce_path, index=False)
+        print(f"Saved consolidated events -> {ce_path}")
 
-    # Print summary stats
-    print("\n--- Event Summary (top 10 by duration) ---")
-    top10 = summary.nlargest(10, "duration_seconds")[
-        ["event_id", "date", "start_time", "end_time", "duration_seconds",
-         "max_concentration", "mean_concentration", "num_measurements"]
-    ]
-    print(top10.to_string(index=False))
+        cd_path = os.path.join(OUTPUT_DIR, "methane_day_event_map_all_sensors.csv")
+        consolidated_days.to_csv(cd_path, index=False)
+        print(f"Saved consolidated day map -> {cd_path}")
 
-    print(f"\n--- Day-Event Map (first 20 rows) ---")
-    print(day_map.head(20).to_string(index=False))
+        print(f"\nConsolidated events: {len(consolidated_events):,} rows across {len(all_summaries)} sensors")
+        print(f"Consolidated day map: {len(consolidated_days)} days")
+        print(f"\nSensors included: {list(all_summaries.keys())}")
+        print(f"\nConsolidated day map columns: {list(consolidated_days.columns)}")
+        print(f"\n--- Consolidated day map (first 10 rows) ---")
+        print(consolidated_days.head(10).to_string(index=False))
 
-    # Save CSVs
-    summary_path = os.path.join(OUTPUT_DIR, f"methane_events_summary_{sensor}.csv")
-    summary.to_csv(summary_path, index=False)
-    print(f"\nSaved event summary -> {summary_path}")
-
-    daymap_path = os.path.join(OUTPUT_DIR, f"methane_day_event_map_{sensor}.csv")
-    day_map.to_csv(daymap_path, index=False)
-    print(f"Saved day-event map -> {daymap_path}")
-
-    events_path = os.path.join(OUTPUT_DIR, f"methane_events_df_{sensor}.csv")
-    df_events.to_csv(events_path, index=False)
-    print(f"Saved events dataframe -> {events_path}")
-
-    # Plots
-    print("\nGenerating plots...")
-    plot_full_timeseries(df, sensor, threshold, PLOTS_DIR)
-    plot_event_durations(summary, sensor, PLOTS_DIR)
-    plot_event_max_concentration(summary, sensor, threshold, PLOTS_DIR)
-    plot_top_events(df, df_events, summary, sensor, threshold, PLOTS_DIR)
-    plot_daily_event_heatmap(df_events, summary, sensor, PLOTS_DIR)
-
-    # BigQuery push
-    if args.push_bq:
-        print("\nPushing to BigQuery...")
-        push_to_bigquery(summary, day_map)
+        if args.push_bq:
+            print("\nPushing consolidated tables to BigQuery...")
+            push_consolidated_to_bigquery(consolidated_events, consolidated_days)
 
     print("\nDone!")
 
