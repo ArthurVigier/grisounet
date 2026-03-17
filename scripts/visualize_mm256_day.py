@@ -1,4 +1,4 @@
-"""Visualize MM256 actuals vs baseline vs model prediction for one calendar day.
+"""Visualize MM256 actuals vs baseline vs model prediction for one or more days.
 
 This script loads the saved final MM256 model artifacts, rebuilds the holdout
 test windows for the same preprocessing configuration, and generates:
@@ -31,7 +31,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from scripts.cv_time_series import build_last_input_baseline
+from scripts.cv_time_series import build_last_input_baseline, compute_mm256_metrics
 from scripts.preprocessor_MM256 import (
     TARGET_SENSOR,
     build_window_index_mm256,
@@ -143,6 +143,61 @@ def _build_detailed_prediction_df(
     return detail_df
 
 
+def load_mm256_prediction_bundle(
+    model_timestamp: str | None = None,
+    source: str = "local",
+    alert_rate: float = 1.0,
+    concentration_threshold: float = 1.0,
+    train_ratio: float = 0.7,
+) -> dict:
+    """Load model artifacts, rebuild holdout predictions, and return detailed rows."""
+    model_timestamp, metadata, scalers, model_path = _load_artifacts(model_timestamp)
+    data, _, _ = preprocess_mm256(
+        source=source,
+        alert_rate=alert_rate,
+        concentration_threshold=concentration_threshold,
+        scale=False,
+    )
+    _, test_df = _split_temporal_holdout(data, train_ratio=train_ratio)
+    scaled_test = _apply_saved_scalers(test_df, scalers)
+
+    window_length = int(metadata["window_length"])
+    forecast_horizon = int(metadata["forecast_horizon"])
+    X_test, y_test = slice_windows_mm256(
+        scaled_test,
+        0,
+        len(scaled_test),
+        window_length,
+        forecast_horizon,
+    )
+    window_index = build_window_index_mm256(
+        scaled_test,
+        0,
+        len(scaled_test),
+        window_length,
+        forecast_horizon,
+    )
+    if X_test.shape[0] == 0:
+        raise ValueError("No test windows available for visualization")
+
+    feature_cols = [col for col in scaled_test.columns if col != "ALERT"]
+    target_feature_idx = feature_cols.index(TARGET_SENSOR)
+
+    model = load_model(model_path, compile=False)
+    y_pred = model.predict(X_test, verbose=0)
+    y_baseline = build_last_input_baseline(X_test, target_feature_idx, y_test.shape[1])
+    target_scaler = scalers[TARGET_SENSOR]
+    detail_df = _build_detailed_prediction_df(window_index, y_test, y_pred, y_baseline, target_scaler)
+
+    return {
+        "model_timestamp": model_timestamp,
+        "metadata": metadata,
+        "detail_df": detail_df,
+        "forecast_horizon": forecast_horizon,
+        "test_period": f"{test_df.index.min()} -> {test_df.index.max()}",
+    }
+
+
 def _quantile(q: float):
     return lambda series: float(series.quantile(q))
 
@@ -165,6 +220,19 @@ def _aggregate_day(detail_df: pd.DataFrame) -> pd.DataFrame:
     grouped["abs_error_model"] = (grouped["actual"] - grouped["predicted_mean"]).abs()
     grouped["abs_error_baseline"] = (grouped["actual"] - grouped["baseline_mean"]).abs()
     return grouped
+
+
+def _build_sample_index(day_detail: pd.DataFrame) -> pd.DataFrame:
+    """Collapse detailed rows to one row per forecast sample."""
+    sample_index = (
+        day_detail.groupby("sample_id")
+        .agg(
+            input_end_time=("input_end_time", "first"),
+            target_start_time=("target_time", "min"),
+        )
+        .reset_index()
+    )
+    return sample_index
 
 
 def _pick_representative_sample(
@@ -271,8 +339,66 @@ def _plot_single_window(day_detail: pd.DataFrame, sample_id: int, output_path: P
     plt.close(fig)
 
 
+def _summarize_day(date_str: str, day_detail: pd.DataFrame, day_agg: pd.DataFrame, representative_sample_id: int) -> dict:
+    """Compute compact day-level summary metrics."""
+    model_metrics = compute_mm256_metrics(
+        day_agg["actual"].to_numpy().reshape(-1, 1, 1),
+        day_agg["predicted_mean"].to_numpy().reshape(-1, 1, 1),
+    )
+    baseline_metrics = compute_mm256_metrics(
+        day_agg["actual"].to_numpy().reshape(-1, 1, 1),
+        day_agg["baseline_mean"].to_numpy().reshape(-1, 1, 1),
+    )
+    peak_row = day_agg.loc[day_agg["actual"].idxmax()]
+    return {
+        "date": date_str,
+        "n_unique_target_times": int(len(day_agg)),
+        "n_unique_samples": int(day_detail["sample_id"].nunique()),
+        "peak_actual": float(peak_row["actual"]),
+        "peak_time": str(peak_row["target_time"]),
+        "model_MAE": model_metrics["MAE"],
+        "baseline_MAE": baseline_metrics["MAE"],
+        "improvement_vs_baseline_MAE": round(baseline_metrics["MAE"] - model_metrics["MAE"], 6),
+        "model_RMSE": model_metrics["RMSE"],
+        "baseline_RMSE": baseline_metrics["RMSE"],
+        "improvement_vs_baseline_RMSE": round(baseline_metrics["RMSE"] - model_metrics["RMSE"], 6),
+        "mean_forecast_multiplicity": round(float(day_agg["n_forecasts"].mean()), 2),
+        "max_forecast_multiplicity": int(day_agg["n_forecasts"].max()),
+        "representative_sample_id": int(representative_sample_id),
+    }
+
+
+def _write_day_report(report_path: Path, model_timestamp: str, test_period: str, summaries: list[dict], outputs: list[dict]):
+    """Persist a compact markdown report for one batch of day analyses."""
+    lines = [
+        f"# MM256 Day Analysis Report ({model_timestamp})",
+        "",
+        f"- Test period: `{test_period}`",
+        "",
+    ]
+    for summary, output in zip(summaries, outputs):
+        lines.extend(
+            [
+                f"## {summary['date']}",
+                "",
+                f"- Peak actual: `{summary['peak_actual']}` at `{summary['peak_time']}`",
+                f"- MAE: model `{summary['model_MAE']}` vs baseline `{summary['baseline_MAE']}`",
+                f"- RMSE: model `{summary['model_RMSE']}` vs baseline `{summary['baseline_RMSE']}`",
+                f"- Mean forecast multiplicity: `{summary['mean_forecast_multiplicity']}`",
+                f"- Representative sample id: `{summary['representative_sample_id']}`",
+                f"- Overlay: `{output['overlay_path']}`",
+                f"- Representative window: `{output['window_path']}`",
+                f"- Detail CSV: `{output['detail_path']}`",
+                f"- Aggregate CSV: `{output['aggregate_path']}`",
+                "",
+            ]
+        )
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def visualize_mm256_day(
     date_str: str,
+    prediction_bundle: dict | None = None,
     model_timestamp: str | None = None,
     source: str = "local",
     alert_rate: float = 1.0,
@@ -280,52 +406,26 @@ def visualize_mm256_day(
     train_ratio: float = 0.7,
     anchor_time: str | None = None,
 ) -> dict:
-    model_timestamp, metadata, scalers, model_path = _load_artifacts(model_timestamp)
-    data, _, _ = preprocess_mm256(
-        source=source,
-        alert_rate=alert_rate,
-        concentration_threshold=concentration_threshold,
-        scale=False,
-    )
-    _, test_df = _split_temporal_holdout(data, train_ratio=train_ratio)
-    scaled_test = _apply_saved_scalers(test_df, scalers)
+    if prediction_bundle is None:
+        prediction_bundle = load_mm256_prediction_bundle(
+            model_timestamp=model_timestamp,
+            source=source,
+            alert_rate=alert_rate,
+            concentration_threshold=concentration_threshold,
+            train_ratio=train_ratio,
+        )
 
-    window_length = int(metadata["window_length"])
-    forecast_horizon = int(metadata["forecast_horizon"])
-    X_test, y_test = slice_windows_mm256(
-        scaled_test,
-        0,
-        len(scaled_test),
-        window_length,
-        forecast_horizon,
-    )
-    window_index = build_window_index_mm256(
-        scaled_test,
-        0,
-        len(scaled_test),
-        window_length,
-        forecast_horizon,
-    )
-    if X_test.shape[0] == 0:
-        raise ValueError("No test windows available for visualization")
-
-    feature_cols = [col for col in scaled_test.columns if col != "ALERT"]
-    target_feature_idx = feature_cols.index(TARGET_SENSOR)
-
-    model = load_model(model_path, compile=False)
-    y_pred = model.predict(X_test, verbose=0)
-    y_baseline = build_last_input_baseline(X_test, target_feature_idx, y_test.shape[1])
-
-    target_scaler = scalers[TARGET_SENSOR]
-    detail_df = _build_detailed_prediction_df(window_index, y_test, y_pred, y_baseline, target_scaler)
-
+    model_timestamp = prediction_bundle["model_timestamp"]
+    forecast_horizon = int(prediction_bundle["forecast_horizon"])
+    detail_df = prediction_bundle["detail_df"]
     day_detail = detail_df[detail_df["target_date"] == date_str].copy()
     if day_detail.empty:
         raise ValueError(f"No forecast targets found for date {date_str}")
 
     day_agg = _aggregate_day(day_detail)
+    sample_index = _build_sample_index(day_detail)
     representative_sample_id = _pick_representative_sample(
-        window_index[window_index["sample_id"].isin(day_detail["sample_id"].unique())].copy(),
+        sample_index,
         day_agg,
         anchor_time=anchor_time,
         forecast_horizon=forecast_horizon,
@@ -342,6 +442,7 @@ def visualize_mm256_day(
     _plot_single_window(day_detail, representative_sample_id, window_path)
     day_detail.to_csv(detail_path, index=False)
     day_agg.to_csv(agg_path, index=False)
+    summary = _summarize_day(date_str, day_detail, day_agg, representative_sample_id)
 
     print(f"Day overlay -> {overlay_path}")
     print(f"Representative window -> {window_path}")
@@ -355,13 +456,54 @@ def visualize_mm256_day(
         "window_path": str(window_path),
         "detail_path": str(detail_path),
         "aggregate_path": str(agg_path),
+        "summary": summary,
         "representative_sample_id": int(representative_sample_id),
     }
 
 
+def visualize_mm256_days(
+    dates: list[str],
+    model_timestamp: str | None = None,
+    source: str = "local",
+    alert_rate: float = 1.0,
+    concentration_threshold: float = 1.0,
+    train_ratio: float = 0.7,
+) -> dict:
+    """Generate visualizations and a markdown report for multiple days."""
+    prediction_bundle = load_mm256_prediction_bundle(
+        model_timestamp=model_timestamp,
+        source=source,
+        alert_rate=alert_rate,
+        concentration_threshold=concentration_threshold,
+        train_ratio=train_ratio,
+    )
+    outputs = []
+    summaries = []
+    for date_str in dates:
+        output = visualize_mm256_day(date_str=date_str, prediction_bundle=prediction_bundle)
+        outputs.append(output)
+        summaries.append(output["summary"])
+
+    report_path = OUTPUT_DIR / f"mm256_day_report_{prediction_bundle['model_timestamp']}.md"
+    _write_day_report(
+        report_path=report_path,
+        model_timestamp=prediction_bundle["model_timestamp"],
+        test_period=prediction_bundle["test_period"],
+        summaries=summaries,
+        outputs=outputs,
+    )
+    print(f"Day report -> {report_path}")
+
+    return {
+        "model_timestamp": prediction_bundle["model_timestamp"],
+        "report_path": str(report_path),
+        "days": outputs,
+    }
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Visualize MM256 predictions for a single day")
-    parser.add_argument("--date", required=True, help="Calendar day to analyze, format YYYY-MM-DD")
+    parser = argparse.ArgumentParser(description="Visualize MM256 predictions for one or more days")
+    parser.add_argument("--date", action="append", required=True, help="Calendar day to analyze, format YYYY-MM-DD; repeat for multiple days")
     parser.add_argument("--model-timestamp", default=None, help="Saved model timestamp, for example mm256_20260317_181604")
     parser.add_argument("--source", choices=["bq", "cache", "local"], default="local")
     parser.add_argument("--alert-rate", type=float, default=1.0)
@@ -370,14 +512,25 @@ def main():
     parser.add_argument("--anchor-time", default=None, help="Optional input end time to force the representative window")
     args = parser.parse_args()
 
-    visualize_mm256_day(
-        date_str=args.date,
+    if len(args.date) == 1:
+        visualize_mm256_day(
+            date_str=args.date[0],
+            model_timestamp=args.model_timestamp,
+            source=args.source,
+            alert_rate=args.alert_rate,
+            concentration_threshold=args.concentration_threshold,
+            train_ratio=args.train_ratio,
+            anchor_time=args.anchor_time,
+        )
+        return
+
+    visualize_mm256_days(
+        dates=args.date,
         model_timestamp=args.model_timestamp,
         source=args.source,
         alert_rate=args.alert_rate,
         concentration_threshold=args.concentration_threshold,
         train_ratio=args.train_ratio,
-        anchor_time=args.anchor_time,
     )
 
 
