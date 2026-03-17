@@ -2,8 +2,9 @@
 TimeSeriesSplit cross-validation harness for the MM256 pipeline.
 
 Performs k-fold temporal cross-validation using sklearn's TimeSeriesSplit,
-trains the LSTM encoder-decoder on each fold, aggregates metrics, and
-optionally pushes fold results to BigQuery.
+trains the LSTM encoder-decoder on each fold, compares it to a persistence
+baseline built from the last MM256 value seen in each input window, aggregates
+metrics, and optionally pushes fold results to BigQuery.
 
 Key design decisions
 --------------------
@@ -51,18 +52,16 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from scripts.preprocessor_MM256 import (
-    preprocess_mm256,
-    scale_fold,
-    slice_windows_mm256,
-    TARGET_SENSOR,
-)
+from scripts.preprocessor_MM256 import scale_fold, slice_windows_mm256, TARGET_SENSOR
 from ml_logic.secrets import get_secret
 
 
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
+METRIC_KEYS = ("MAE", "RMSE", "MAPE_%", "pinball_90")
+
+
 def _compute_fold_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     """Compute error metrics for a single fold.
 
@@ -95,6 +94,19 @@ def _compute_fold_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
         "MAPE_%": round(mape, 4),
         "pinball_90": round(pinball, 6),
     }
+
+
+def _build_last_input_baseline(
+    X: np.ndarray,
+    target_feature_idx: int,
+    horizon: int,
+) -> np.ndarray:
+    """Repeat the last target value seen in the input window across the horizon."""
+    if X.size == 0:
+        return np.empty((0, horizon, 1), dtype=np.float32)
+
+    last_seen = X[:, -1, target_feature_idx].astype(np.float32)
+    return np.repeat(last_seen[:, None, None], horizon, axis=1)
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +229,6 @@ def run_cv(
 
     fold_metrics = []
     fold_histories = []
-    fold_details = []
 
     plots_dir = os.path.join(PROJECT_ROOT, "results", "graphs", "mm256_cv")
     os.makedirs(plots_dir, exist_ok=True)
@@ -253,6 +264,9 @@ def run_cv(
             window_length, forecast_horizon,
         )
 
+        feature_cols = [c for c in scaled_val.columns if c != "ALERT"]
+        target_feature_idx = feature_cols.index(TARGET_SENSOR)
+
         print(f"  X_train: {X_train.shape}, y_train: {y_train.shape}")
         print(f"  X_val:   {X_val.shape},   y_val:   {y_val.shape}")
 
@@ -287,7 +301,20 @@ def run_cv(
 
         # ---- Predict & evaluate ----
         y_pred = model.predict(X_val, batch_size=batch_size)
+        y_baseline = _build_last_input_baseline(
+            X_val,
+            target_feature_idx=target_feature_idx,
+            horizon=y_val.shape[1],
+        )
+
         metrics = _compute_fold_metrics(y_val, y_pred)
+        baseline_metrics = _compute_fold_metrics(y_val, y_baseline)
+        metrics.update({f"baseline_{key}": value for key, value in baseline_metrics.items()})
+        for key in METRIC_KEYS:
+            metrics[f"improvement_vs_baseline_{key}"] = round(
+                baseline_metrics[key] - metrics[key],
+                6 if key != "MAPE_%" else 4,
+            )
         metrics["fold"] = fold_idx
         metrics["status"] = "ok"
         metrics["n_train_windows"] = int(X_train.shape[0])
@@ -298,8 +325,18 @@ def run_cv(
         metrics["val_period"] = f"{val_start} -> {val_end}"
 
         fold_metrics.append(metrics)
-        print(f"  Metrics: MAE={metrics['MAE']:.5f}  RMSE={metrics['RMSE']:.5f}  "
-              f"Pinball90={metrics['pinball_90']:.5f}")
+        print(
+            "  Metrics:"
+            f" LSTM MAE={metrics['MAE']:.5f}"
+            f" | baseline MAE={metrics['baseline_MAE']:.5f}"
+            f" | gain={metrics['improvement_vs_baseline_MAE']:.5f}"
+        )
+        print(
+            "           "
+            f"LSTM RMSE={metrics['RMSE']:.5f}"
+            f" | baseline RMSE={metrics['baseline_RMSE']:.5f}"
+            f" | gain={metrics['improvement_vs_baseline_RMSE']:.5f}"
+        )
 
         # ---- Fold plots ----
         # (a) Loss curve
@@ -320,6 +357,7 @@ def run_cv(
             fig, ax = plt.subplots(figsize=(12, 4))
             ax.plot(y_val[sample_idx, :, 0], label="Actual", linewidth=2)
             ax.plot(y_pred[sample_idx, :, 0], label="Predicted", linestyle=":", linewidth=2)
+            ax.plot(y_baseline[sample_idx, :, 0], label="Last value seen", linestyle="--", linewidth=2)
             ax.set_title(f"Fold {fold_idx} — MM256 Forecast (sample {sample_idx})")
             ax.set_xlabel("Forecast step (seconds)")
             ax.set_ylabel("MM256 (scaled)")
@@ -332,7 +370,7 @@ def run_cv(
         print(f"  Fold {fold_idx} done in {elapsed:.1f}s\n")
 
         # Clean up to free GPU/CPU memory
-        del model, X_train, y_train, X_val, y_val, y_pred
+        del model, X_train, y_train, X_val, y_val, y_pred, y_baseline
         del scaled_train, scaled_val, fold_scalers
         tf.keras.backend.clear_session()
         gc.collect()
@@ -341,10 +379,16 @@ def run_cv(
     ok_folds = [m for m in fold_metrics if m.get("status") == "ok"]
     if ok_folds:
         agg = {}
-        for key in ["MAE", "RMSE", "MAPE_%", "pinball_90"]:
+        for key in METRIC_KEYS:
             vals = [m[key] for m in ok_folds]
             agg[f"{key}_mean"] = round(float(np.mean(vals)), 6)
             agg[f"{key}_std"] = round(float(np.std(vals)), 6)
+            baseline_vals = [m[f"baseline_{key}"] for m in ok_folds]
+            agg[f"baseline_{key}_mean"] = round(float(np.mean(baseline_vals)), 6)
+            agg[f"baseline_{key}_std"] = round(float(np.std(baseline_vals)), 6)
+            improvement_vals = [m[f"improvement_vs_baseline_{key}"] for m in ok_folds]
+            agg[f"improvement_vs_baseline_{key}_mean"] = round(float(np.mean(improvement_vals)), 6)
+            agg[f"improvement_vs_baseline_{key}_std"] = round(float(np.std(improvement_vals)), 6)
         agg["n_folds_ok"] = len(ok_folds)
         agg["n_folds_skipped"] = n_splits - len(ok_folds)
     else:
@@ -355,10 +399,26 @@ def run_cv(
     print(f"  CV Summary — {len(ok_folds)}/{n_splits} folds completed")
     print(f"{'='*60}")
     if ok_folds:
-        print(f"  MAE:       {agg['MAE_mean']:.5f} +/- {agg['MAE_std']:.5f}")
-        print(f"  RMSE:      {agg['RMSE_mean']:.5f} +/- {agg['RMSE_std']:.5f}")
-        print(f"  MAPE:      {agg['MAPE_%_mean']:.2f}% +/- {agg['MAPE_%_std']:.2f}%")
-        print(f"  Pinball90: {agg['pinball_90_mean']:.5f} +/- {agg['pinball_90_std']:.5f}")
+        print(
+            f"  MAE:       model={agg['MAE_mean']:.5f} +/- {agg['MAE_std']:.5f}"
+            f" | baseline={agg['baseline_MAE_mean']:.5f} +/- {agg['baseline_MAE_std']:.5f}"
+            f" | gain={agg['improvement_vs_baseline_MAE_mean']:.5f}"
+        )
+        print(
+            f"  RMSE:      model={agg['RMSE_mean']:.5f} +/- {agg['RMSE_std']:.5f}"
+            f" | baseline={agg['baseline_RMSE_mean']:.5f} +/- {agg['baseline_RMSE_std']:.5f}"
+            f" | gain={agg['improvement_vs_baseline_RMSE_mean']:.5f}"
+        )
+        print(
+            f"  MAPE:      model={agg['MAPE_%_mean']:.2f}% +/- {agg['MAPE_%_std']:.2f}%"
+            f" | baseline={agg['baseline_MAPE_%_mean']:.2f}% +/- {agg['baseline_MAPE_%_std']:.2f}%"
+            f" | gain={agg['improvement_vs_baseline_MAPE_%_mean']:.2f}"
+        )
+        print(
+            f"  Pinball90: model={agg['pinball_90_mean']:.5f} +/- {agg['pinball_90_std']:.5f}"
+            f" | baseline={agg['baseline_pinball_90_mean']:.5f} +/- {agg['baseline_pinball_90_std']:.5f}"
+            f" | gain={agg['improvement_vs_baseline_pinball_90_mean']:.5f}"
+        )
 
     # ---- Per-fold summary table ----
     metrics_df = pd.DataFrame(fold_metrics)
@@ -389,7 +449,14 @@ def run_cv(
         ):
             vals = [m[key] for m in ok_folds]
             ax.bar(fold_nums, vals, color=color, alpha=0.8)
-            ax.axhline(np.mean(vals), color="grey", ls="--", label=f"mean={np.mean(vals):.4f}")
+            baseline_vals = [m[f"baseline_{key}"] for m in ok_folds]
+            ax.axhline(np.mean(vals), color="grey", ls="--", label=f"model={np.mean(vals):.4f}")
+            ax.axhline(
+                np.mean(baseline_vals),
+                color="black",
+                ls=":",
+                label=f"baseline={np.mean(baseline_vals):.4f}",
+            )
             ax.set_xlabel("Fold")
             ax.set_ylabel(key)
             ax.set_title(key)
