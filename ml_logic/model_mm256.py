@@ -1,14 +1,37 @@
 """Single-sensor LSTM models for MM256 methane forecasting."""
 
 import numpy as np
+import tensorflow as tf
+
+
+@tf.keras.utils.register_keras_serializable(package="grisounet")
+class PinballLoss(tf.keras.losses.Loss):
+    """Serializable pinball loss used by the MM256 models."""
+
+    def __init__(
+        self,
+        quantile: float = 0.9,
+        name: str = "pinball_loss",
+        reduction: str = "sum_over_batch_size",
+    ):
+        super().__init__(name=name, reduction=reduction)
+        self.quantile = float(quantile)
+
+    def call(self, y_true, y_pred):
+        error = y_true - y_pred
+        return tf.reduce_mean(
+            tf.maximum(self.quantile * error, (self.quantile - 1.0) * error)
+        )
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"quantile": self.quantile})
+        return config
 
 
 def pinball_loss(y_true, y_pred, quantile=0.9):
-    """Pinball (quantile) loss."""
-    import tensorflow as tf
-
-    error = y_true - y_pred
-    return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
+    """Backward-compatible functional wrapper around the serializable loss."""
+    return PinballLoss(quantile=quantile)(y_true, y_pred)
 
 
 def build_simple_lstm_mm256(
@@ -32,7 +55,7 @@ def build_simple_lstm_mm256(
     ])
     model.compile(
         optimizer="adam",
-        loss=lambda y_true, y_pred: pinball_loss(y_true, y_pred, quantile=quantile),
+        loss=PinballLoss(quantile=quantile),
     )
     return model
 
@@ -59,7 +82,7 @@ def build_advanced_lstm_mm256(
     ])
     model.compile(
         optimizer="adam",
-        loss=lambda y_true, y_pred: pinball_loss(y_true, y_pred, quantile=quantile),
+        loss=PinballLoss(quantile=quantile),
     )
     return model
 
@@ -101,8 +124,6 @@ def _fit_mm256_model(
     batch_size: int = 32,
     patience: int = 5,
 ):
-    import tensorflow as tf
-
     early_stop = tf.keras.callbacks.EarlyStopping(
         monitor="val_loss",
         patience=patience,
