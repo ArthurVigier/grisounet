@@ -1,0 +1,57 @@
+# === GIT (CRITIQUE) ===
+.git
+.gitignore
+.gitattributes
+.git/lfs
+
+# === DOCKER (inutile dans l'image) ===
+Dockerfile
+.dockerignore
+docker-compose*.yml
+*.dockerfile
+
+# === BUILD & ARTIFACTS ===
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# === ENV & VIRTUEL ===
+venv/
+.venv/
+env/
+.env
+.python-version
+*.pyc
+*.pyo
+__pycache__/
+
+# === DATA LOURDE (ajuste selon tes besoins) ===
+raw_data/
+results/
+data/
+datasets/
+*.csv
+*.pkl
+*.parquet
+*.npy
+*.keras
+*.pt
+*.pth
+
+# === NOTEBOOKS & DOCS ===
+*.ipynb
+.ipynb_checkpoints/
+*.pptx
+*.pdf
+SETUP_GUIDE.txt
+TA_WALKTHROUGH.txt
+
+# === OS & EDITOR ===
+.DS_Store
+*Zone*
+.vscode/
+.idea/
+*.swp
+*.swo
