@@ -37,7 +37,7 @@ def fetch_all_tables(limit=None):
             query = f"SELECT * FROM `{full_ref}`"
             if limit:
                 query += f" LIMIT {limit}"
-            df = client.query(query).result().to_dataframe()
+            df = client.query(query).result().to_dataframe(create_bqstorage_client=True)
 
             path = os.path.join(output_dir, f"{table_id}.csv")
             df.to_csv(path, index=False)
