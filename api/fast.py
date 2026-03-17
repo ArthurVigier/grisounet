@@ -1,13 +1,12 @@
-import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from ml_logic.model import more_advanced_lstm
-from ml_logic.model_save import save_model_to_gcs,load_model_from_gcs
-from ml_logic.preprocessor import load_data_local , preprocess_split,slice_arrays,feature_target
+from ml_logic.model_save import load_model_from_gcs
+from ml_logic.data import load_modeling_dataframe
+from ml_logic.preprocessor import preprocess_split, slice_arrays
 import numpy as np
 from pydantic import BaseModel
 from typing import List, Any
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 app = FastAPI()
 
 # Allowing all middleware is optional, but good practice for dev purposes
@@ -20,16 +19,21 @@ app.add_middleware(
 )
 
 @app.get("/preprocess")
-def preprocess(start_index,stop_index):
+def preprocess(start_index: int, stop_index: int):
     """
-    Preprocess step , please keep in mind that you must precise which index you want to use
-    index work in datetime format only between 2014-03-02 00:00:00 and 2014-05-15 13:52:30
+    Preprocess data pulled from BigQuery and return sliced train/test arrays.
+    start_index and stop_index are positional row offsets, not datetime strings.
     """
-    df = load_data_local()
-    train_data, test_data, scalers = preprocess_split(df)
-    X_train , y_train = slice_arrays(train_data,start_index,stop_index)
-    X_test, y_test = slice_arrays(test_data,start_index,stop_index)
-    return X_train,y_train,X_test,y_test
+    df = load_modeling_dataframe(source="bq")
+    train_data, test_data, _ = preprocess_split(df)
+    X_train, y_train = slice_arrays(train_data, start_index, stop_index)
+    X_test, y_test = slice_arrays(test_data, start_index, stop_index)
+    return {
+        "X_train": X_train.tolist(),
+        "y_train": y_train.tolist(),
+        "X_test": X_test.tolist(),
+        "y_test": y_test.tolist(),
+    }
 
 class PredictRequest(BaseModel):
     timestamp: str

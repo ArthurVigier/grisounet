@@ -5,7 +5,8 @@ from aeon.transformations.collection.feature_based import Catch22
 import numpy as np
 import pandas as pd
 from sklearn.metrics import make_scorer
-from ml_logic.preprocessor import load_data_local , preprocess_split, sample_datasets,feature_target
+from ml_logic.data import load_modeling_dataframe
+from ml_logic.preprocessor import preprocess_split, sample_datasets,feature_target
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, LSTM, Input,TimeDistributed, RepeatVector, Conv1D, Flatten
 from tensorflow.keras.models import Sequential
@@ -62,7 +63,7 @@ def smap_loss(y_true, y_pred):
     return 200 * np.mean(np.abs(y_true - y_pred) / (np.abs(y_true) + np.abs(y_pred) + 1e-8))
 
 def load_and_preprocess():
-    df = load_data_local()
+    df = load_modeling_dataframe(source="bq")
     train_df, test_df = preprocess_split(df)
     MM256_df, MM263_df, MM264_df = sample_datasets(train_df)
     return MM256_df, MM263_df, MM264_df , test_df , df

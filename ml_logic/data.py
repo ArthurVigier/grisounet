@@ -31,6 +31,21 @@ def pull_data_from_bq():
     return df
 
 
+def load_modeling_dataframe(source: str = "bq") -> pd.DataFrame:
+    """Load the modeling dataframe from the requested source.
+
+    The VM path should use BigQuery and Secret Manager by default.
+    Local CSV loading remains available for research workflows only.
+    """
+    if source == "bq":
+        return pull_data_from_bq()
+    if source == "local":
+        from ml_logic.preprocessor import load_data_local
+
+        return load_data_local()
+    raise ValueError("source must be either 'bq' or 'local'")
+
+
 def save_preprocessing_to_bq(X_train, X_test, y_train, y_test):
     """
     Saves preprocessing results to a timestamped BigQuery table.
