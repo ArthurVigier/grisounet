@@ -2,7 +2,12 @@ import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from ml_logic.model import more_advanced_lstm
+from ml_logic.model_save import save_model_to_gcs,load_model_from_gcs
 from ml_logic.preprocessor import load_data_local , preprocess_split,slice_arrays,feature_target
+import numpy as np
+from pydantic import BaseModel
+from typing import List, Any
+from fastapi import FastAPI, HTTPException
 app = FastAPI()
 
 # Allowing all middleware is optional, but good practice for dev purposes
@@ -26,16 +31,21 @@ def preprocess(start_index,stop_index):
     X_test, y_test = slice_arrays(test_data,start_index,stop_index)
     return X_train,y_train,X_test,y_test
 
+class PredictRequest(BaseModel):
+    timestamp: str
+    X_pred: List[Any]
 
-# http://127.0.0.1:8000/predict?pickup_datetime=2014-07-06+19:18:00&pickup_longitude=-73.950655&pickup_latitude=40.783282&dropoff_longitude=-73.984365&dropoff_latitude=40.769802&passenger_count=2
-@app.get("/train_and_test_model")
-def train_and_test_model(X_train,y_train,X_test,y_test):      # 1
-    """
-    Train the model from the preprocessing function data
-    """
-    model , history,y_pred = more_advanced_lstm(X_train,y_train,X_test,y_test)
-    assert model is not None
-    return model,history,y_pred
+@app.post("/predict")
+def predict(data: PredictRequest):
+    model = load_model_from_gcs(data.timestamp)
+
+    if model is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    X_pred = np.array(data.X_pred)
+    prediction = model.predict(X_pred)
+
+    return {"prediction": prediction.tolist()}
 
 @app.get("/")
 def root():
