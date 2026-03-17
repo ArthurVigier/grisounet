@@ -6,11 +6,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-SENSORS = ["MM256", "MM263", "MM264"]
+SENSORS_DEFAULT = ["MM256", "MM263", "MM264"]
 
 
-def plot_loss_curves(history, timestamp):
-    """Plot training vs validation loss."""
+def plot_loss_curves(history, timestamp, label_prefix=""):
+    """Plot training vs validation loss.
+
+    Parameters
+    ----------
+    label_prefix : str
+        Optional prefix for the saved filename (e.g. ``"mm256_"``).
+    """
     os.makedirs("results/graphs", exist_ok=True)
 
     plt.figure(figsize=(12, 5))
@@ -21,17 +27,32 @@ def plot_loss_curves(history, timestamp):
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.legend()
-    plt.savefig(f"results/graphs/loss_{timestamp}.png", dpi=150)
+    plt.savefig(f"results/graphs/{label_prefix}loss_{timestamp}.png", dpi=150)
     plt.close()
-    print(f"Loss curve -> results/graphs/loss_{timestamp}.png")
+    print(f"Loss curve -> results/graphs/{label_prefix}loss_{timestamp}.png")
 
 
-def plot_predictions_vs_actual(pred_df, timestamp):
-    """Plot predicted vs actual for each sensor."""
+def plot_predictions_vs_actual(pred_df, timestamp, sensors=None, label_prefix=""):
+    """Plot predicted vs actual for each sensor.
+
+    Parameters
+    ----------
+    sensors : list[str], optional
+        Sensor names to plot.  Defaults to ``["MM256", "MM263", "MM264"]``.
+        Pass ``["MM256"]`` for the single-sensor pipeline.
+    label_prefix : str
+        Optional prefix for saved filenames.
+    """
+    if sensors is None:
+        sensors = SENSORS_DEFAULT
+
     os.makedirs("results/graphs", exist_ok=True)
 
-    for sensor in SENSORS:
+    for sensor in sensors:
         sensor_df = pred_df[pred_df["sensor"] == sensor]
+        if sensor_df.empty:
+            print(f"  No data for sensor {sensor}, skipping plot.")
+            continue
 
         # Average across forecast steps per sample
         avg = sensor_df.groupby("sample_id")[["actual", "predicted"]].mean()
@@ -51,26 +72,44 @@ def plot_predictions_vs_actual(pred_df, timestamp):
         axes[1].axvline(0, color="red", linestyle="--")
 
         plt.tight_layout()
-        plt.savefig(f"results/graphs/{sensor}_{timestamp}.png", dpi=150)
+        plt.savefig(f"results/graphs/{label_prefix}{sensor}_{timestamp}.png", dpi=150)
         plt.close()
 
     print(f"Sensor graphs -> results/graphs/")
 
 
-def compute_metrics(pred_df, timestamp):
-    """Compute error metrics per sensor."""
+def compute_metrics(pred_df, timestamp, sensors=None, label_prefix=""):
+    """Compute error metrics per sensor.
+
+    Parameters
+    ----------
+    sensors : list[str], optional
+        Sensor names to evaluate.  Defaults to ``["MM256", "MM263", "MM264"]``.
+        Pass ``["MM256"]`` for the single-sensor pipeline.
+    label_prefix : str
+        Optional prefix for saved filenames.
+
+    Returns
+    -------
+    pd.DataFrame with columns [sensor, MAE, RMSE, MAPE_%].
+    """
+    if sensors is None:
+        sensors = SENSORS_DEFAULT
+
     os.makedirs("results/graphs", exist_ok=True)
 
     metrics = []
-    for sensor in SENSORS:
+    for sensor in sensors:
         s = pred_df[pred_df["sensor"] == sensor]
+        if s.empty:
+            continue
         mae = np.mean(np.abs(s["residual"]))
         rmse = np.sqrt(np.mean(s["residual"] ** 2))
         mape = np.mean(np.abs(s["residual"] / (s["actual"] + 1e-8))) * 100
         metrics.append({"sensor": sensor, "MAE": mae, "RMSE": rmse, "MAPE_%": mape})
 
     metrics_df = pd.DataFrame(metrics)
-    metrics_df.to_csv(f"results/graphs/metrics_{timestamp}.csv", index=False)
+    metrics_df.to_csv(f"results/graphs/{label_prefix}metrics_{timestamp}.csv", index=False)
 
     print(f"\nModel Performance:")
     print(metrics_df.to_string(index=False))
