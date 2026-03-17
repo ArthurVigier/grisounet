@@ -46,21 +46,22 @@ def save_predictions_to_bq(y_test, y_pred, timestamp=None):
     if not timestamp:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    rows = []
-    for sample_idx in range(y_test.shape[0]):
-        for step in range(y_test.shape[1]):
-            for sensor_idx, sensor_name in enumerate(SENSORS):
-                rows.append({
-                    "sample_id": sample_idx,
-                    "forecast_step": step,
-                    "sensor": sensor_name,
-                    "actual": float(y_test[sample_idx, step, sensor_idx]),
-                    "predicted": float(y_pred[sample_idx, step, sensor_idx]),
-                    "residual": float(y_test[sample_idx, step, sensor_idx]
-                                      - y_pred[sample_idx, step, sensor_idx]),
-                })
+    columns = ["sample_id", "forecast_step", "sensor", "actual", "predicted", "residual", "run_timestamp"]
+    if y_test.size == 0 or y_pred.size == 0:
+        print("Predictions skipped: no test windows available.")
+        return pd.DataFrame(columns=columns)
 
-    pred_df = pd.DataFrame(rows)
+    sample_count, horizon, sensor_count = y_test.shape
+    actual = y_test.reshape(-1)
+    predicted = y_pred.reshape(-1)
+    pred_df = pd.DataFrame({
+        "sample_id": np.repeat(np.arange(sample_count), horizon * sensor_count),
+        "forecast_step": np.tile(np.repeat(np.arange(horizon), sensor_count), sample_count),
+        "sensor": np.tile(np.array(SENSORS), sample_count * horizon),
+        "actual": actual.astype(float),
+        "predicted": predicted.astype(float),
+        "residual": (actual - predicted).astype(float),
+    })
     pred_df["run_timestamp"] = timestamp
 
     table_ref = f"{project}.{dataset}.predictions_{timestamp}"
