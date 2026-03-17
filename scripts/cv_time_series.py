@@ -49,6 +49,26 @@ def compute_mm256_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     }
 
 
+def compute_mm256_horizon_metrics(y_true: np.ndarray, y_pred: np.ndarray, label: str) -> pd.DataFrame:
+    """Compute per-step forecast metrics for one prediction source."""
+    records = []
+    horizon = y_true.shape[1]
+    for forecast_step in range(horizon):
+        step_true = y_true[:, forecast_step:forecast_step + 1, :]
+        step_pred = y_pred[:, forecast_step:forecast_step + 1, :]
+        step_metrics = compute_mm256_metrics(step_true, step_pred)
+        bias = float(np.mean(step_pred.ravel() - step_true.ravel()))
+        records.append(
+            {
+                "forecast_step": forecast_step + 1,
+                "label": label,
+                **step_metrics,
+                "bias": round(bias, 6),
+            }
+        )
+    return pd.DataFrame(records)
+
+
 def build_last_input_baseline(X: np.ndarray, target_feature_idx: int, horizon: int) -> np.ndarray:
     """Repeat the last MM256 value seen in the input window across the horizon."""
     if X.size == 0:
@@ -93,6 +113,68 @@ def _aggregate_cv_metrics(ok_folds: list[dict], n_splits: int) -> dict:
     return agg
 
 
+def _aggregate_horizon_metrics(horizon_frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """Aggregate per-step metrics across folds."""
+    if not horizon_frames:
+        return pd.DataFrame()
+
+    all_horizon = pd.concat(horizon_frames, ignore_index=True)
+    summary = (
+        all_horizon.groupby(["label", "forecast_step"])
+        .agg(
+            MAE_mean=("MAE", "mean"),
+            MAE_std=("MAE", "std"),
+            RMSE_mean=("RMSE", "mean"),
+            RMSE_std=("RMSE", "std"),
+            MAPE_mean=("MAPE_%", "mean"),
+            MAPE_std=("MAPE_%", "std"),
+            pinball_mean=("pinball_90", "mean"),
+            pinball_std=("pinball_90", "std"),
+            bias_mean=("bias", "mean"),
+            bias_std=("bias", "std"),
+            n_folds=("forecast_step", "size"),
+        )
+        .reset_index()
+        .fillna(0.0)
+    )
+    return summary
+
+
+def _plot_horizon_summary(horizon_summary: pd.DataFrame, output_path: str):
+    """Plot per-step error profiles for model vs baseline."""
+    if horizon_summary.empty:
+        return
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 4.5), sharex=True)
+    plot_specs = [
+        ("MAE", "MAE_mean", "MAE_std"),
+        ("RMSE", "RMSE_mean", "RMSE_std"),
+        ("Bias", "bias_mean", "bias_std"),
+    ]
+    color_map = {"model": "#1565c0", "baseline": "#ef6c00"}
+
+    for ax, (title, mean_col, std_col) in zip(axes, plot_specs):
+        for label in ("model", "baseline"):
+            subset = horizon_summary[horizon_summary["label"] == label].sort_values("forecast_step")
+            if subset.empty:
+                continue
+            x = subset["forecast_step"].to_numpy()
+            mean_vals = subset[mean_col].to_numpy()
+            std_vals = subset[std_col].to_numpy()
+            color = color_map[label]
+            ax.plot(x, mean_vals, label=label.title(), color=color, linewidth=2)
+            ax.fill_between(x, mean_vals - std_vals, mean_vals + std_vals, color=color, alpha=0.18)
+        ax.set_title(title)
+        ax.set_xlabel("Forecast step (s)")
+        ax.grid(alpha=0.25)
+
+    axes[0].set_ylabel("Metric value")
+    axes[0].legend()
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def run_cv_mm256(
     train_df: pd.DataFrame,
     n_splits: int = 5,
@@ -123,6 +205,7 @@ def run_cv_mm256(
     indices = np.arange(len(train_df))
     fold_metrics = []
     fold_histories = []
+    fold_horizon_metrics = []
 
     for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(indices), start=1):
         fold_t = perf_counter()
@@ -191,6 +274,15 @@ def run_cv_mm256(
 
         y_pred = model.predict(X_val, batch_size=batch_size)
         y_baseline = build_last_input_baseline(X_val, target_feature_idx, y_val.shape[1])
+        fold_horizon = pd.concat(
+            [
+                compute_mm256_horizon_metrics(y_val, y_pred, label="model"),
+                compute_mm256_horizon_metrics(y_val, y_baseline, label="baseline"),
+            ],
+            ignore_index=True,
+        )
+        fold_horizon["fold"] = fold_idx
+        fold_horizon_metrics.append(fold_horizon)
 
         metrics = _merge_model_and_baseline_metrics(
             compute_mm256_metrics(y_val, y_pred),
@@ -272,6 +364,15 @@ def run_cv_mm256(
     os.makedirs(results_dir, exist_ok=True)
     metrics_path = os.path.join(results_dir, f"cv_mm256_{timestamp}.csv")
     metrics_df.to_csv(metrics_path, index=False)
+    horizon_metrics_path = os.path.join(results_dir, f"cv_mm256_horizon_{timestamp}.csv")
+    horizon_summary_path = os.path.join(results_dir, f"cv_mm256_horizon_summary_{timestamp}.csv")
+    horizon_plot_path = os.path.join(plots_dir, f"cv_horizon_summary_{timestamp}.png")
+
+    horizon_df = pd.concat(fold_horizon_metrics, ignore_index=True) if fold_horizon_metrics else pd.DataFrame()
+    horizon_df.to_csv(horizon_metrics_path, index=False)
+    horizon_summary = _aggregate_horizon_metrics(fold_horizon_metrics)
+    horizon_summary.to_csv(horizon_summary_path, index=False)
+    _plot_horizon_summary(horizon_summary, horizon_plot_path)
 
     agg_path = os.path.join(results_dir, f"cv_mm256_aggregate_{timestamp}.json")
     with open(agg_path, "w", encoding="utf-8") as stream:
@@ -279,6 +380,10 @@ def run_cv_mm256(
 
     print(f"\nMetrics saved -> {metrics_path}")
     print(f"Aggregate saved -> {agg_path}")
+    if not horizon_df.empty:
+        print(f"Horizon metrics saved -> {horizon_metrics_path}")
+        print(f"Horizon summary saved -> {horizon_summary_path}")
+        print(f"Horizon plot -> {horizon_plot_path}")
 
     if len(ok_folds) > 1:
         fig, axes = plt.subplots(1, 3, figsize=(15, 4))
@@ -318,6 +423,9 @@ def run_cv_mm256(
         "model_variant": model_variant,
         "metrics_path": metrics_path,
         "aggregate_path": agg_path,
+        "horizon_metrics_path": horizon_metrics_path,
+        "horizon_summary_path": horizon_summary_path,
+        "horizon_plot_path": horizon_plot_path,
     }
 
 

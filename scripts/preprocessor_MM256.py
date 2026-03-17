@@ -324,6 +324,57 @@ def slice_windows_mm256(
     return X_arr, y_arr
 
 
+def build_window_index_mm256(
+    df: pd.DataFrame,
+    start_index: int = 0,
+    stop_index: int | None = None,
+    window_length_in_sec: int = 300,
+    forecast_horizon_in_sec: int = 120,
+) -> pd.DataFrame:
+    """Return one row of metadata per valid MM256 forecast window.
+
+    The returned rows match the sample order produced by ``slice_windows_mm256``
+    for the same dataframe and arguments.
+    """
+    if stop_index is None:
+        stop_index = len(df)
+
+    input_length = window_length_in_sec - forecast_horizon_in_sec
+    if input_length <= 0:
+        raise ValueError("window_length_in_sec must be > forecast_horizon_in_sec")
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("Expected DatetimeIndex")
+
+    subset = df.iloc[start_index:stop_index]
+    trigger_times = subset.index[subset["ALERT"] == 1]
+    subset_index = subset.index
+    one_sec = pd.Timedelta(seconds=1)
+
+    rows = []
+    sample_id = 0
+    for t0 in trigger_times:
+        x_times = pd.date_range(end=t0, periods=input_length, freq="s")
+        y_times = pd.date_range(start=t0 + one_sec, periods=forecast_horizon_in_sec, freq="s")
+
+        x_idx = subset_index.get_indexer(x_times)
+        y_idx = subset_index.get_indexer(y_times)
+        if (x_idx < 0).any() or (y_idx < 0).any():
+            continue
+
+        rows.append(
+            {
+                "sample_id": sample_id,
+                "input_start_time": x_times[0],
+                "input_end_time": x_times[-1],
+                "target_start_time": y_times[0],
+                "target_end_time": y_times[-1],
+            }
+        )
+        sample_id += 1
+
+    return pd.DataFrame(rows)
+
+
 # ---------------------------------------------------------------------------
 # 5. Per-fold scaler: refit on training portion only (no data leakage)
 # ---------------------------------------------------------------------------
