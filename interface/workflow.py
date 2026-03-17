@@ -71,7 +71,7 @@ def run_pipeline(
     train_data, test_data, scalers = preprocess_split(df)
 
     X_train, y_train = slice_arrays(train_data, start_index, stop_index)
-    X_test, y_test = slice_arrays(test_data, start_index, stop_index)
+    X_test, y_test = slice_arrays(test_data, 0, len(test_data))
 
     print(f"  X_train: {X_train.shape}, y_train: {y_train.shape}")
     print(f"  X_test:  {X_test.shape},  y_test:  {y_test.shape}")
