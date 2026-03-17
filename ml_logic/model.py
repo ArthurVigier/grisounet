@@ -1,16 +1,9 @@
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
-from aeon.transformations.collection.feature_based import Catch22
-# Exemple simple
 import numpy as np
 import pandas as pd
-from sklearn.metrics import make_scorer
-from ml_logic.data import load_modeling_dataframe
-from ml_logic.preprocessor import preprocess_split, sample_datasets,feature_target
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, LSTM, Input,TimeDistributed, RepeatVector, Conv1D, Flatten
-from tensorflow.keras.models import Sequential
- # Import TimeDistributed
+from tensorflow.keras.layers import Dense, LSTM, Input, TimeDistributed, RepeatVector, Conv1D, Flatten
 import tensorflow as tf
 
 catch22_feature_names = [
@@ -47,9 +40,8 @@ def linreg(X,y):
     return model
 
 def catch22_features(df, target_col):
+    from aeon.transformations.collection.feature_based import Catch22
     ts = df[target_col].values.reshape(df.shape[0], -1)  # ts pour time-serie # shape (n_samples, n_timesteps)
-    c22 = Catch22()
-    # les noms des features
     c22 = Catch22(catch24=True)  # ou catch24=True pour 24 features
     df_transformed = c22.fit_transform(ts)  # shape (n_samples, 22) ou (n_samples, 22 * n_channels)
 
@@ -62,11 +54,19 @@ def catch22_features(df, target_col):
 def smap_loss(y_true, y_pred):
     return 200 * np.mean(np.abs(y_true - y_pred) / (np.abs(y_true) + np.abs(y_pred) + 1e-8))
 
+
+def pinball_loss_keras(y_true, y_pred, quantile=0.5):
+    error = y_true - y_pred
+    return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
+
+
 def load_and_preprocess():
+    from ml_logic.data import load_modeling_dataframe
+    from ml_logic.preprocessor import preprocess_split, sample_datasets
     df = load_modeling_dataframe(source="bq")
-    train_df, test_df = preprocess_split(df)
+    train_df, test_df, scalers = preprocess_split(df)
     MM256_df, MM263_df, MM264_df = sample_datasets(train_df)
-    return MM256_df, MM263_df, MM264_df , test_df , df
+    return MM256_df, MM263_df, MM264_df, test_df, df
 
 def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
 
@@ -150,31 +150,17 @@ def lstm(df,target_col,lags=300, alpha=1.0, test_ratio=0.3, horizon=180):
     print(f"Reshaped X_train shape (LSTM): {X_train_reshaped.shape}")
     print(f"Reshaped X_test shape (LSTM): {X_test_reshaped.shape}")
 
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import Dense, LSTM, Input
-    import tensorflow as tf
-
-    def pinball_loss_keras(y_true, y_pred, quantile=0.5):
-        error = y_true - y_pred
-        return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
-
     model = Sequential()
-    # Input layer for LSTM expects (timesteps, features)
     model.add(Input(shape=(lags, X_df.shape[1])))
-    model.add(LSTM(units=64)) # Using LSTM instead of SimpleRNN
+    model.add(LSTM(units=64))
     model.add(Dense(1))
     model.compile(optimizer='adam', loss=lambda y_true, y_pred: pinball_loss_keras(y_true, y_pred, quantile=0.5))
-    model.fit(X_train_reshaped, y_train, epochs=10, batch_size=32, validation_split=0.2)
+    history = model.fit(X_train_reshaped, y_train, epochs=10, batch_size=32, validation_split=0.2)
     y_pred = model.predict(X_test_reshaped)
 
-    return model , y_test , y_pred
+    return model, history, y_test, y_pred
 
 def more_advanced_lstm(X_train,y_train,X_test,y_test):
-
-    def pinball_loss_keras(y_true, y_pred, quantile=0.5):
-        error = y_true - y_pred
-        return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
-
     model = Sequential()
     # Encoder part
     model.add(LSTM(units=64, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])))
@@ -186,7 +172,24 @@ def more_advanced_lstm(X_train,y_train,X_test,y_test):
     model.add(TimeDistributed(Dense(y_train.shape[2]))) # Output layer for each timestep
 
     model.compile(optimizer='adam', loss=lambda y_true, y_pred: pinball_loss_keras(y_true, y_pred, quantile=0.9))
-    history = model.fit(X_train, y_train, epochs=40, batch_size=32, validation_split=0.2)
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss",
+        patience=5,
+        restore_best_weights=True,
+    )
+    history = model.fit(
+        X_train,
+        y_train,
+        epochs=40,
+        batch_size=32,
+        validation_split=0.2,
+        callbacks=[early_stopping],
+    )
+
+    if X_test.shape[0] == 0 or y_test.shape[0] == 0:
+        print("No test windows available; skipping prediction and evaluation.")
+        return model, history, np.empty_like(y_test)
+
     y_pred = model.predict(X_test)
     score = model.evaluate(X_test, y_test)
     print(f"Test loss: {score}")
@@ -206,9 +209,6 @@ def conv1d_simpl(X_train,y_train,X_test,y_test):
   model.add(LSTM(units=4, return_sequences=True)) # Decoder LSTM to process the repeated vector
   model.add(TimeDistributed(Dense(y_train.shape[2]))) # Output layer for each timestep
 
-  def pinball_loss_keras(y_true, y_pred, quantile=0.5):
-        error = y_true - y_pred
-        return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
   model.compile(optimizer='adam', loss=lambda y_true, y_pred: pinball_loss_keras(y_true, y_pred, quantile=0.9))
   es = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
   history = model.fit(X_train, y_train, epochs=500, batch_size=32, validation_split=0.2,callbacks=[es])

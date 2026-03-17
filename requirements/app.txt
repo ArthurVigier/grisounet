@@ -1,7 +1,9 @@
 # Production/runtime dependencies for the packaged app and API.
-aeon==1.3.0
+# aeon is only needed for catch22 features (research only), install separately:
+#   pip install aeon==1.3.0 (requires pandas<2.1)
 fastapi==0.135.1
 google-cloud-bigquery==3.40.1
+google-cloud-bigquery-storage[pyarrow]==2.36.2
 google-cloud-secret-manager==2.26.0
 google-cloud-storage==3.9.0
 matplotlib==3.10.8
@@ -11,3 +13,4 @@ python-dotenv==1.2.2
 scikit-learn==1.7.2
 seaborn==0.13.2
 tensorflow==2.21.0
+uvicorn==0.34.3
