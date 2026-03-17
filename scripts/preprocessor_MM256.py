@@ -5,14 +5,14 @@ Loads the full dataset, filters to days where MM256 reaches >= 1% methane
 concentration, engineers features for a single-sensor target, and prepares
 data ready for TimeSeriesSplit cross-validation.
 
-This module is designed to be imported by cv_time_series.py (which handles
-the actual fold loop and model training), or run standalone for inspection.
+This module is designed to be imported by the MM256 workflow, the CV harness,
+and the final-training module, or run standalone for inspection.
 
 Usage:
     # As a module
     from scripts.preprocessor_MM256 import preprocess_mm256, slice_windows_mm256
-    data, scalers, meta = preprocess_mm256(source="cache", alert_rate=1.0)
-    X, y = slice_windows_mm256(data, start=0, stop=len(data))
+    data, scalers, meta = preprocess_mm256(source="cache", alert_rate=1.0, scale=False)
+    X, y = slice_windows_mm256(data, start_index=0, stop_index=len(data))
 
     # Standalone (inspect + save artifacts)
     python scripts/preprocessor_MM256.py [--source cache] [--alert-rate 1.0] [--push-bq]
@@ -47,30 +47,8 @@ from ml_logic.secrets import get_secret
 # ---------------------------------------------------------------------------
 TARGET_SENSOR = "MM256"
 
-# Feature columns relevant to the MM256 sensor location.
-# We keep co-located environmental sensors + infrastructure readings.
-# Individual motor currents are replaced by AMP_AVG (see below).
-FEATURE_COLS_TO_KEEP = [
-    # Methanometer (target)
-    "MM256",
-    # Airflow
-    "AN422", "AN423",
-    # Temperature (paired probes)
-    "TP1711", "TP1721",
-    # Humidity
-    "RH1712", "RH1722",
-    # Barometric pressure
-    "BA1713", "BA1723",
-    # Pipeline / drainage
-    "CM861", "CR863", "P_864", "TC862", "WM868",
-    # Motor current (will be aggregated)
-    "AMP1_IR", "AMP2_IR", "DMP3_IR", "DMP4_IR", "AMP5_IR",
-    # Discrete
-    "F_SIDE", "V",
-]
-
 # Sensors that are NOT relevant when focusing on MM256 alone.
-# We exclude the other two critical methanometers from features to avoid
+# We exclude the other methanometers from features to avoid
 # information leakage (they are highly correlated and would mask the signal
 # we want MM256 to learn from environmental predictors).
 SENSORS_TO_DROP = ["MM263", "MM264", "MM252", "MM261", "MM262", "MM211"]
@@ -131,11 +109,9 @@ def filter_to_active_days(
     pd.DataFrame
         Filtered copy of *df*.
     """
-    active_set = set(active_days["date"])
-    mask = df.index.date  # array of datetime.date objects
-    keep = pd.Series([d in active_set for d in mask], index=df.index)
-    filtered = df.loc[keep].copy()
-    return filtered
+    active_dates = pd.to_datetime(active_days["date"])
+    keep = df.index.normalize().isin(active_dates)
+    return df.loc[keep].copy()
 
 
 # ---------------------------------------------------------------------------
@@ -146,11 +122,9 @@ def preprocess_mm256(
     cache_raw: bool = False,
     alert_rate: float = 1.0,
     concentration_threshold: float = 1.0,
+    scale: bool = True,
 ) -> tuple:
-    """Load data, filter to active days, engineer features, and scale.
-
-    This function does NOT split into train/test — that is handled by the
-    TimeSeriesSplit cross-validation harness in ``cv_time_series.py``.
+    """Load data, filter to active days, engineer features, and optionally scale.
 
     Parameters
     ----------
@@ -165,15 +139,19 @@ def preprocess_mm256(
     concentration_threshold : float
         Minimum daily peak MM256 value to include a day.  Days where MM256
         never reaches this value are entirely excluded.
+    scale : bool
+        If True, fit MinMaxScaler on the full filtered dataset.
+        If False, return the unscaled dataframe so a downstream caller can
+        fit scalers on train folds / train split only.
 
     Returns
     -------
     (processed_df, scalers, metadata)
         processed_df : pd.DataFrame
-            Scaled DataFrame with DatetimeIndex, ready for slicing into
-            (X, y) windows.  Contains only active-day rows.
+            DataFrame with DatetimeIndex, ready for slicing into (X, y)
+            windows. Scaled if ``scale=True``, otherwise left unscaled.
         scalers : dict
-            {column_name: fitted MinMaxScaler} — needed for inverse transform.
+            {column_name: fitted MinMaxScaler}. Empty when ``scale=False``.
         metadata : dict
             Diagnostic information (active_days DataFrame, row counts, etc.).
     """
@@ -224,21 +202,19 @@ def preprocess_mm256(
     if len(float_cols) > 0:
         df[float_cols] = df[float_cols].astype(np.float32)
 
-    # ---- Scale with MinMaxScaler (fit on FULL filtered data) ----
-    # NOTE: When used with TimeSeriesSplit, we refit the scaler on each
-    # fold's training portion only.  The scaler returned here is fitted on
-    # the entire filtered dataset and is useful for quick inspection / plots.
-    # The CV harness in cv_time_series.py handles per-fold scaling properly.
+    # ---- Optional full-data scaling ----
     scalers = {}
-    features_to_scale = df.select_dtypes(include=["floating"]).columns
-    for col in features_to_scale:
-        scaler = MinMaxScaler()
-        df[col] = scaler.fit_transform(df[[col]]).astype(np.float32)
-        scalers[col] = scaler
+    if scale:
+        features_to_scale = df.select_dtypes(include=["floating"]).columns
+        for col in features_to_scale:
+            scaler = MinMaxScaler()
+            df[col] = scaler.fit_transform(df[[col]]).astype(np.float32)
+            scalers[col] = scaler
 
     feature_cols = [c for c in df.columns if c not in ["ALERT"]]
     print(f"Feature columns ({len(feature_cols)}): {feature_cols}")
     print(f"Target: {TARGET_SENSOR}")
+    print(f"Scaled: {scale}")
 
     metadata = {
         "target_sensor": TARGET_SENSOR,
@@ -426,6 +402,7 @@ def main():
         cache_raw=args.cache_raw,
         alert_rate=args.alert_rate,
         concentration_threshold=args.concentration_threshold,
+        scale=True,
     )
 
     # ---- Diagnostic output ----
