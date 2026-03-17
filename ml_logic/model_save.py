@@ -39,4 +39,4 @@ def load_model_from_gcs(timestamp):
     os.makedirs("results/models", exist_ok=True)
     blob.download_to_filename(local_path)
 
-    return load_model(local_path)
+    return load_model(local_path, safe_mode=False)
