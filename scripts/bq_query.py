@@ -57,7 +57,7 @@ def run_query(sql, save_path=None):
         sql = sql.replace("from ", f"from `{project}.{dataset}`.")
 
     print(f"Running query...\n")
-    df = client.query(sql).result().to_dataframe()
+    df = client.query(sql).result().to_dataframe(create_bqstorage_client=True)
     print(f"Results: {df.shape[0]} rows x {df.shape[1]} columns\n")
     print(df.to_string(max_rows=30, max_cols=15))
 
@@ -127,7 +127,7 @@ def describe_table(table_name):
         )""")
 
     query = f"SELECT s.* FROM {full_ref}, UNNEST([{','.join(stats)}]) AS s"
-    df = client.query(query).result().to_dataframe()
+    df = client.query(query).result().to_dataframe(create_bqstorage_client=True)
 
     print(f"Summary statistics for {table_name}:\n")
     print(df.to_string(index=False))
@@ -149,7 +149,7 @@ def latest_run(prefix):
     print(f"Latest {prefix} run: {latest}\n")
 
     query = f"SELECT * FROM `{project}.{dataset}.{latest}` LIMIT 50"
-    df = client.query(query).result().to_dataframe()
+    df = client.query(query).result().to_dataframe(create_bqstorage_client=True)
     print(df.to_string(max_rows=30, max_cols=15))
     print(f"\n({df.shape[0]} rows shown, use --save to export full table)")
 

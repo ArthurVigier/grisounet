@@ -17,7 +17,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory caches to avoid reloading on every request
+# ---------------------------------------------------------------------------
+# Caches — 3-sensor pipeline
+# ---------------------------------------------------------------------------
 _cached_data = {"df": None, "train": None, "test": None, "scalers": None}
 _cached_models = {}
 
@@ -41,6 +43,35 @@ def _get_model(timestamp: str):
     return _cached_models[timestamp]
 
 
+# ---------------------------------------------------------------------------
+# Caches — MM256 single-sensor pipeline
+# ---------------------------------------------------------------------------
+_cached_mm256 = {"data": None, "scalers": None, "meta": None}
+_cached_mm256_models = {}
+
+
+def _get_mm256_preprocessed():
+    """Load and preprocess MM256-only data, cache for subsequent requests."""
+    if _cached_mm256["data"] is None:
+        from scripts.preprocessor_MM256 import preprocess_mm256
+        data, scalers, meta = preprocess_mm256(source="cache")
+        _cached_mm256["data"] = data
+        _cached_mm256["scalers"] = scalers
+        _cached_mm256["meta"] = meta
+    return _cached_mm256["data"], _cached_mm256["scalers"], _cached_mm256["meta"]
+
+
+def _get_mm256_model(timestamp: str):
+    """Load MM256 model from GCS (model name prefixed with mm256_)."""
+    key = f"mm256_{timestamp}"
+    if key not in _cached_mm256_models:
+        _cached_mm256_models[key] = load_model_from_gcs(f"mm256_{timestamp}")
+    return _cached_mm256_models[key]
+
+
+# ---------------------------------------------------------------------------
+# Existing endpoints — 3-sensor pipeline
+# ---------------------------------------------------------------------------
 @app.get("/preprocess")
 def preprocess(start_index: int, stop_index: int):
     """
@@ -65,6 +96,7 @@ class PredictRequest(BaseModel):
 
 @app.post("/predict")
 def predict(data: PredictRequest):
+    """Predict using the 3-sensor model."""
     model = _get_model(data.timestamp)
 
     if model is None:
@@ -76,15 +108,81 @@ def predict(data: PredictRequest):
     return {"prediction": prediction.tolist()}
 
 
+# ---------------------------------------------------------------------------
+# New endpoints — MM256 single-sensor pipeline
+# ---------------------------------------------------------------------------
+@app.get("/preprocess_mm256")
+def preprocess_mm256_endpoint():
+    """Return MM256 preprocessing metadata (active days, row counts)."""
+    _, _, meta = _get_mm256_preprocessed()
+    return {
+        "target_sensor": meta["target_sensor"],
+        "concentration_threshold": meta["concentration_threshold"],
+        "n_active_days": meta["n_active_days"],
+        "n_active_rows": meta["n_active_rows"],
+        "n_alert_rows": meta["n_alert_rows"],
+        "feature_columns": meta["feature_columns"],
+    }
+
+
+class PredictMM256Request(BaseModel):
+    timestamp: str
+    X_pred: List[Any]
+
+
+@app.post("/predict_mm256")
+def predict_mm256(data: PredictMM256Request):
+    """Predict MM256 methane concentration using the single-sensor model.
+
+    Request body:
+        timestamp : str — model version to load (e.g. "20260317_120000")
+        X_pred : list — input tensor, shape (n_samples, input_length, n_features)
+
+    Response:
+        prediction : list — predicted MM256 values, shape (n_samples, horizon, 1)
+        sensor : "MM256"
+    """
+    model = _get_mm256_model(data.timestamp)
+
+    if model is None:
+        raise HTTPException(status_code=404, detail="MM256 model not found")
+
+    X_pred = np.array(data.X_pred, dtype=np.float32)
+    prediction = model.predict(X_pred)
+
+    return {
+        "sensor": "MM256",
+        "prediction": prediction.tolist(),
+    }
+
+
+@app.get("/predict_mm256/info")
+def predict_mm256_info():
+    """Return expected input/output shapes for the MM256 prediction endpoint."""
+    return {
+        "sensor": "MM256",
+        "input_shape": "(n_samples, 180, n_features)",
+        "output_shape": "(n_samples, 120, 1)",
+        "note": "Input length = window_length - forecast_horizon = 300 - 120 = 180 seconds",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cache management
+# ---------------------------------------------------------------------------
 @app.post("/reload")
 def reload_cache():
-    """Force reload data and clear model cache."""
+    """Force reload data and clear model cache (both pipelines)."""
     _cached_data["df"] = None
     _cached_data["train"] = None
     _cached_data["test"] = None
     _cached_data["scalers"] = None
     _cached_models.clear()
-    return {"status": "cache cleared"}
+    _cached_mm256["data"] = None
+    _cached_mm256["scalers"] = None
+    _cached_mm256["meta"] = None
+    _cached_mm256_models.clear()
+    return {"status": "all caches cleared"}
 
 
 @app.get("/")
