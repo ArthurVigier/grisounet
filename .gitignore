@@ -1,7 +1,10 @@
 raw_data/
+EDA/
+qn-analysis/
 results/
 venv/
 .venv/
+
 .env
 .python-version
 
