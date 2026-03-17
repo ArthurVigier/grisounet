@@ -22,48 +22,6 @@ def load_data_local() -> pd.DataFrame:
     return cast_float_columns_to_float32(pd.read_csv('raw_data/methane_data.csv'))
 
 
-def build_sequence_arrays(
-    feature_values: np.ndarray,
-    target_values: np.ndarray,
-    alert_values: np.ndarray,
-    input_steps: int,
-    forecast_horizon_in_sec: int,
-    step_size_in_sec: int = 1) -> tuple[np.ndarray, np.ndarray]:
-    """Build X/y sequence tensors using positional NumPy indexing only."""
-    if input_steps <= 0:
-        raise ValueError("input_steps must be > 0")
-    if forecast_horizon_in_sec <= 0:
-        raise ValueError("forecast_horizon_in_sec must be > 0")
-    if step_size_in_sec <= 0:
-        raise ValueError("step_size_in_sec must be > 0")
-
-    history_span = (input_steps - 1) * step_size_in_sec
-    trigger_positions = np.flatnonzero(alert_values == 1)
-
-    if trigger_positions.size == 0:
-        X_empty = np.empty((0, input_steps, feature_values.shape[1]), dtype=np.float32)
-        y_empty = np.empty((0, forecast_horizon_in_sec, target_values.shape[1]), dtype=np.float32)
-        return X_empty, y_empty
-
-    valid_positions = trigger_positions[
-        (trigger_positions >= history_span)
-        & (trigger_positions + forecast_horizon_in_sec < len(alert_values))]
-
-    if valid_positions.size == 0:
-        X_empty = np.empty((0, input_steps, feature_values.shape[1]), dtype=np.float32)
-        y_empty = np.empty((0, forecast_horizon_in_sec, target_values.shape[1]), dtype=np.float32)
-        return X_empty, y_empty
-
-    x_offsets = np.arange(-history_span, 1, step_size_in_sec, dtype=np.int32)
-    y_offsets = np.arange(1, forecast_horizon_in_sec + 1, dtype=np.int32)
-
-    X_indices = valid_positions[:, None] + x_offsets[None, :]
-    y_indices = valid_positions[:, None] + y_offsets[None, :]
-
-    X_array = feature_values[X_indices].astype(np.float32, copy=False)
-    y_array = target_values[y_indices].astype(np.float32, copy=False)
-
-    return X_array, y_array
 
 
 def preprocess_split(input_df: pd.DataFrame, test_size: float =0.3, alert_rate : float =1.0) -> tuple:
@@ -169,6 +127,50 @@ def preprocess_max(df: pd.DataFrame, test_size: float =0.3, alert_rate : float =
     return train_data, test_data, scalers
 
 
+def build_sequence_arrays(
+    feature_values: np.ndarray,
+    target_values: np.ndarray,
+    alert_values: np.ndarray,
+    input_steps: int,
+    forecast_horizon_in_sec: int,
+    step_size_in_sec: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    """Build X/y sequence tensors using positional NumPy indexing only."""
+    if input_steps <= 0:
+        raise ValueError("input_steps must be > 0")
+    if forecast_horizon_in_sec <= 0:
+        raise ValueError("forecast_horizon_in_sec must be > 0")
+    if step_size_in_sec <= 0:
+        raise ValueError("step_size_in_sec must be > 0")
+
+    history_span = (input_steps - 1) * step_size_in_sec
+    trigger_positions = np.flatnonzero(alert_values == 1)
+
+    if trigger_positions.size == 0:
+        X_empty = np.empty((0, input_steps, feature_values.shape[1]), dtype=np.float32)
+        y_empty = np.empty((0, forecast_horizon_in_sec, target_values.shape[1]), dtype=np.float32)
+        return X_empty, y_empty
+
+    valid_positions = trigger_positions[
+        (trigger_positions >= history_span)
+        & (trigger_positions + forecast_horizon_in_sec < len(alert_values))]
+
+    if valid_positions.size == 0:
+        X_empty = np.empty((0, input_steps, feature_values.shape[1]), dtype=np.float32)
+        y_empty = np.empty((0, forecast_horizon_in_sec, target_values.shape[1]), dtype=np.float32)
+        return X_empty, y_empty
+
+    x_offsets = np.arange(-history_span, 1, step_size_in_sec, dtype=np.int32)
+    y_offsets = np.arange(1, forecast_horizon_in_sec + 1, dtype=np.int32)
+
+    X_indices = valid_positions[:, None] + x_offsets[None, :]
+    y_indices = valid_positions[:, None] + y_offsets[None, :]
+
+    X_array = feature_values[X_indices].astype(np.float32, copy=False)
+    y_array = target_values[y_indices].astype(np.float32, copy=False)
+
+    return X_array, y_array
+
+
 def slice_arrays(df: pd.DataFrame, start_index: int = 0, stop_index: int | None = None, window_length_in_sec: int =300, forecast_horizon_in_sec: int =120) -> tuple :
     ''' creates a subset of the input dataframe - the observations between start_index and stop_index (excluded),
         prepares dataframe slices containing observations exceeding the alert_rate passed to function prerocess_split,
@@ -201,8 +203,7 @@ def slice_arrays(df: pd.DataFrame, start_index: int = 0, stop_index: int | None 
         alert_values=alert_values,
         input_steps=input_length_in_sec,
         forecast_horizon_in_sec=forecast_horizon_in_sec,
-        step_size_in_sec=1,
-    )
+        step_size_in_sec=1)
 
     del feature_values
     del target_values
@@ -210,6 +211,70 @@ def slice_arrays(df: pd.DataFrame, start_index: int = 0, stop_index: int | None 
     gc.collect()
 
     return X_array, y_array
+
+
+def preprocess_split_sequences(
+    input_df: pd.DataFrame,
+    test_size: float = 0.3,
+    alert_rate: float = 1.0,
+    start_index: int = 0,
+    stop_index: int | None = None,
+    window_length_in_sec: int = 300,
+    forecast_horizon_in_sec: int = 120,
+) -> tuple:
+    """Run preprocess_split, then build train/test sequence arrays."""
+    train_data, test_data, scalers = preprocess_split(
+        input_df=input_df,
+        test_size=test_size,
+        alert_rate=alert_rate,
+    )
+    X_train, y_train = slice_arrays(
+        train_data,
+        start_index=start_index,
+        stop_index=stop_index,
+        window_length_in_sec=window_length_in_sec,
+        forecast_horizon_in_sec=forecast_horizon_in_sec,
+    )
+    X_test, y_test = slice_arrays(
+        test_data,
+        start_index=start_index,
+        stop_index=stop_index,
+        window_length_in_sec=window_length_in_sec,
+        forecast_horizon_in_sec=forecast_horizon_in_sec,
+    )
+    return X_train, y_train, X_test, y_test, scalers
+
+
+def preprocess_max_sequences(
+    input_df: pd.DataFrame,
+    test_size: float = 0.3,
+    alert_rate: float = 1.0,
+    start_index: int = 0,
+    stop_index: int | None = None,
+    window_length_in_sec: int = 300,
+    forecast_horizon_in_sec: int = 120,
+) -> tuple:
+    """Run preprocess_max, then build train/test sequence arrays."""
+    train_data, test_data, scalers = preprocess_max(
+        df=input_df,
+        test_size=test_size,
+        alert_rate=alert_rate,
+    )
+    X_train, y_train = slice_arrays(
+        train_data,
+        start_index=start_index,
+        stop_index=stop_index,
+        window_length_in_sec=window_length_in_sec,
+        forecast_horizon_in_sec=forecast_horizon_in_sec,
+    )
+    X_test, y_test = slice_arrays(
+        test_data,
+        start_index=start_index,
+        stop_index=stop_index,
+        window_length_in_sec=window_length_in_sec,
+        forecast_horizon_in_sec=forecast_horizon_in_sec,
+    )
+    return X_train, y_train, X_test, y_test, scalers
 
 
 
@@ -323,36 +388,4 @@ def preprocess_c22(df: pd.DataFrame, test_size: float =0.3, alert_rate : float =
         y_train.astype(np.float32, copy=False),
         X_test_scaled,
         y_test.astype(np.float32, copy=False),
-        scalers,
-    )
-
-
-# We initially thought this would be useful to train the model - EDA helped us realize this wasn't a good option
-# We have kept the code for now - will probably get rid of it eventually
-def sample_datasets(df_scaled: pd.DataFrame) -> list :
-    """ splits a pre-processed, scaled main dataset into 3 sample datasets focused on MM256, MM263, MM264.
-        takes a PRE-PROCESSED, SCALED dataset as input.
-        returns a list containing 3 sample datasets corresponding to captors MM256, MM263 and MM264 in this order."""
-
-    # create sample scaled dataset for sensor MM256 (methanometer)
-    MM256_features = ['AN422', 'TP1711', 'RH1712', 'BA1713', 'MM256', 'CM861', 'CR863', 'P_864', 'TC862', 'WM868', 'AMP_AVG', 'F_SIDE', 'V', 'ALERT']
-    MM256_df = df_scaled[MM256_features]
-
-    # create sample scaled dataset for sensor MM263 (methanometer)
-    MM263_features = ['AN422', 'TP1711', 'RH1712', 'BA1713', 'MM263', 'CM861', 'CR863', 'P_864', 'TC862', 'WM868', 'AMP_AVG', 'F_SIDE', 'V', 'ALERT']
-    MM263_df = df_scaled[MM263_features]
-
-    # create sample scaled dataset for sensor MM264 (methanometer)
-    MM264_features = ['AN422', 'TP1711', 'RH1712', 'BA1713', 'MM264', 'CM861', 'CR863', 'P_864', 'TC862', 'WM868', 'AMP_AVG', 'F_SIDE', 'V', 'ALERT']
-    MM264_df = df_scaled[MM264_features]
-
-    return [MM256_df, MM263_df, MM264_df]
-
-# We initially thought this would be useful to train the model - EDA helped us realize this wasn't a good option
-# We have kept the code for now - will probably get rid of it eventually
-def feature_target(df: pd.DataFrame, target: str) -> tuple:
-    """ within a DataFrame, isolates target variable from features
-        takes as input a dataframe and a string corresponding to the column representing the target"""
-    y = df[target]
-    X = df.drop(columns=[target])
-    return X, y
+        scalers)
