@@ -1,0 +1,165 @@
+===============================================
+  GRISOUNET — Data Query & Analysis Guide
+===============================================
+
+This guide explains how to query BigQuery, review pipeline results,
+and work with data — all from VSCode terminal without downloading files.
+
+
+-----------------------------------------------
+1. SETUP (one-time)
+-----------------------------------------------
+
+# Authenticate with GCP
+gcloud auth login
+gcloud auth application-default login
+
+# Activate your virtual environment
+cd /path/to/grisounet
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Create your local .env file (if not already done)
+cat > .env << 'EOF'
+GCP_PROJECT=spheric-voyager-484810-k0
+GCP_REGION=europe-west1
+BUCKET_NAME=grisou_bucket
+BQ_REGION=EU
+BQ_DATASET=grisou_eu
+BQ_TABLE=Table_grisou
+EOF
+
+
+-----------------------------------------------
+2. QUICK COMMANDS (from VSCode terminal)
+-----------------------------------------------
+
+# List all tables in BigQuery
+python scripts/bq_query.py --list
+
+# Show schema and row count for a table
+python scripts/bq_query.py --info Table_grisou
+
+# Get summary statistics (mean, std, min, max) — runs on BQ, not locally
+python scripts/bq_query.py --describe Table_grisou
+
+# Run any SQL query
+python scripts/bq_query.py "SELECT * FROM Table_grisou LIMIT 10"
+
+# Run a query and save results to CSV
+python scripts/bq_query.py "SELECT * FROM Table_grisou LIMIT 1000" --save my_sample.csv
+
+# View latest preprocessing results
+python scripts/bq_query.py --latest preprocess
+
+# View latest model training history (loss per epoch)
+python scripts/bq_query.py --latest history
+
+# View latest predictions (actual vs predicted per sensor)
+python scripts/bq_query.py --latest predictions
+
+
+-----------------------------------------------
+3. EXAMPLE QUERIES
+-----------------------------------------------
+
+# Count rows
+python scripts/bq_query.py "SELECT COUNT(*) as total FROM Table_grisou"
+
+# Average methane readings per sensor
+python scripts/bq_query.py "SELECT AVG(MM256) as avg_256, AVG(MM263) as avg_263, AVG(MM264) as avg_264 FROM Table_grisou"
+
+# Data for a specific date range
+python scripts/bq_query.py "SELECT * FROM Table_grisou WHERE year=2014 AND month=3 AND day=2 LIMIT 100"
+
+# Hourly averages for sensor MM256
+python scripts/bq_query.py "SELECT hour, AVG(MM256) as avg_mm256 FROM Table_grisou GROUP BY hour ORDER BY hour"
+
+# Compare preprocessing runs
+python scripts/bq_query.py --list
+# Then pick two preprocess tables and compare
+
+
+-----------------------------------------------
+4. REVIEWING PIPELINE RESULTS
+-----------------------------------------------
+
+After running the pipeline (python -m interface.workflow), three types
+of indexed tables are created in BigQuery:
+
+  preprocess_YYYYMMDD_HHMMSS   — preprocessed data from each run
+  history_YYYYMMDD_HHMMSS      — training loss/metrics per epoch
+  predictions_YYYYMMDD_HHMMSS  — actual vs predicted per sensor
+
+To review the latest run:
+
+  python scripts/bq_query.py --latest preprocess
+  python scripts/bq_query.py --latest history
+  python scripts/bq_query.py --latest predictions
+
+To compare two runs (e.g. check if model improved):
+
+  python scripts/bq_query.py "SELECT AVG(ABS(residual)) as mae, sensor FROM predictions_20260316_180000 GROUP BY sensor"
+  python scripts/bq_query.py "SELECT AVG(ABS(residual)) as mae, sensor FROM predictions_20260317_090000 GROUP BY sensor"
+
+To export results locally for further analysis:
+
+  python scripts/bq_query.py "SELECT * FROM predictions_20260316_180000" --save results/my_analysis.csv
+
+
+-----------------------------------------------
+5. LOCAL vs BIGQUERY — WHEN TO USE WHICH
+-----------------------------------------------
+
+USE BIGQUERY (no download) when:
+  - You want quick stats (counts, averages, distributions)
+  - You're checking pipeline results (preprocessing, history, predictions)
+  - You're exploring the data before committing to a full analysis
+  - You want to share results with teammates (everyone sees same BQ tables)
+
+  Command: python scripts/bq_query.py "YOUR SQL HERE"
+
+USE LOCAL DOWNLOAD when:
+  - You need to run custom Python/pandas code on the data
+  - You want to create plots or visualizations
+  - You're doing feature engineering experiments
+  - You need offline access
+
+  Command: python scripts/bq_query.py "SELECT * FROM Table_grisou LIMIT 50000" --save my_data.csv
+  Or:      python scripts/fetch_tables.py --limit 10000
+
+
+-----------------------------------------------
+6. RUNNING ON THE VM
+-----------------------------------------------
+
+SSH into the VM:
+  gcloud compute ssh grisou-instance --project=grisounet --zone=europe-west1-b
+
+Then same commands work:
+  cd /home/grisounet
+  source venv/bin/activate
+  python scripts/bq_query.py --list
+
+The VM uses Secret Manager automatically (no .env needed).
+The VM is in europe-west1 (same region as BQ EU) so queries are fast.
+
+VM schedule: auto-starts 9AM, auto-stops 6PM Mon-Fri (Paris time).
+Only Quentin can start/stop/resize the VM.
+
+
+-----------------------------------------------
+7. USEFUL LINKS
+-----------------------------------------------
+
+BigQuery console:
+  https://console.cloud.google.com/bigquery?project=spheric-voyager-484810-k0&d=grisou_eu
+
+Cloud Storage bucket:
+  https://console.cloud.google.com/storage/browser/grisou_bucket
+
+VM instance:
+  https://console.cloud.google.com/compute/instancesDetail/zones/europe-west1-b/instances/grisou-instance?project=grisounet
+
+GitHub repo:
+  https://github.com/ArthurVigier/grisounet

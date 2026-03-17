@@ -1,4 +1,5 @@
 """Fetch all BigQuery tables locally into results/tables/"""
+import argparse
 import os
 import sys
 
@@ -8,7 +9,7 @@ from google.cloud import bigquery
 from ml_logic.secrets import get_secret
 
 
-def fetch_all_tables():
+def fetch_all_tables(limit=None):
     """Download every table in the grisou dataset as CSV."""
     project = get_secret("GCP_PROJECT")
     dataset = get_secret("BQ_DATASET")
@@ -24,7 +25,8 @@ def fetch_all_tables():
     output_dir = "results/tables"
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"Found {len(tables)} tables in {project}.{dataset}\n")
+    limit_msg = f" (limit: {limit} rows)" if limit else " (full)"
+    print(f"Found {len(tables)} tables in {project}.{dataset}{limit_msg}\n")
 
     for table in tables:
         table_id = table.table_id
@@ -33,6 +35,8 @@ def fetch_all_tables():
         print(f"  Fetching {table_id}...", end=" ")
         try:
             query = f"SELECT * FROM `{full_ref}`"
+            if limit:
+                query += f" LIMIT {limit}"
             df = client.query(query).result().to_dataframe()
 
             path = os.path.join(output_dir, f"{table_id}.csv")
@@ -45,4 +49,8 @@ def fetch_all_tables():
 
 
 if __name__ == "__main__":
-    fetch_all_tables()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Max rows per table (default: all)")
+    args = parser.parse_args()
+    fetch_all_tables(limit=args.limit)
