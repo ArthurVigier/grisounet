@@ -1,0 +1,6 @@
+-r app.txt
+
+# Developer tooling
+ipdb==0.13.13
+pylint==4.0.5
+pytest==9.0.2

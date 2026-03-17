@@ -1,6 +1,7 @@
 raw_data/
 results/
 venv/
+.venv/
 .env
 .python-version
 
@@ -14,6 +15,8 @@ __pycache__/
 *.pyc
 
 .ipynb_checkpoints/
+checkpoints/
+.pytest_cache/
 
 SETUP_GUIDE.txt
 TA_WALKTHROUGH.txt

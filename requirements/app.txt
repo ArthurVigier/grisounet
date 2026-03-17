@@ -1,0 +1,13 @@
+# Production/runtime dependencies for the packaged app and API.
+aeon
+fastapi
+google-cloud-bigquery==3.40.1
+google-cloud-secret-manager==2.26.0
+google-cloud-storage==3.9.0
+matplotlib==3.10.8
+numpy==1.26.4
+pandas==3.0.1
+python-dotenv==1.2.2
+scikit-learn==1.8.0
+seaborn==0.13.2
+tensorflow

@@ -22,9 +22,15 @@ Methane time-series forecasting project with a small production codepath and a s
 ## Getting started
 
 1. Install Git LFS.
-2. Create a virtual environment and install dependencies from `requirements.txt`.
-3. Populate `.env` with the required GCP and storage settings if you are running locally.
-4. Run `make data` to fetch and unpack the local methane dataset.
+2. Create a virtual environment.
+3. Install the dependency set you need:
+
+   - production/runtime only: `pip install -r requirements.txt`
+   - contributor tooling: `pip install -r requirements/dev.txt`
+   - notebooks and exploratory analysis: `pip install -r requirements/research.txt`
+
+4. Populate `.env` with the required GCP and storage settings if you are running locally.
+5. Run `make data` to fetch and unpack the local methane dataset.
 
 ## Main workflows
 
@@ -38,3 +44,4 @@ Methane time-series forecasting project with a small production codepath and a s
 
 - The repository currently contains both runnable application code and historical research material, but they are now separated by directory.
 - `venv/`, notebook checkpoints, local outputs, and other machine-specific artifacts should stay out of version control.
+- `requirements/full.txt` preserves the previous all-in-one environment as a legacy snapshot; new work should use the split files under `requirements/`.
