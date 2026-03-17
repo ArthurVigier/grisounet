@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 load_dotenv()
 
 
-def run_pipeline(start_index=0, stop_index=100000):
+def run_pipeline(start_index=0, stop_index=1000000):
     """
     Run the full pipeline: pull -> preprocess -> train -> predict -> analyse
 
@@ -59,11 +59,20 @@ def run_pipeline(start_index=0, stop_index=100000):
     # Step 5: Analyses
     print("\nStep 5/5 -- Generating analysis...")
     # todo: add more analysis functions here and save results to BQ or GCS as needed
-    plt.plot(history.history['loss'])
-    plt.plot(history.history['val_loss'])
+    os.makedirs("results/graphs", exist_ok=True)
+    plt.figure(figsize=(12, 5))
+    plt.plot(history.history['loss'], label="Train Loss")
+    plt.plot(history.history['val_loss'], label="Val Loss")
+    plt.title("Training & Validation Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.savefig(f"results/graphs/loss_{timestamp}.png", dpi=150)
+    plt.close()
+    print(f"  Saved results/graphs/loss_{timestamp}.png")
     # plot_loss_curves
     # plot_predictions_vs_actual
-    sample_idx = 4000
+    sample_idx = min(4000, y_test.shape[0] - 1)
     target_cols = ["MM256", "MM263", "MM264"]
 
     for target_idx, target_name in enumerate(target_cols):
@@ -74,7 +83,10 @@ def run_pipeline(start_index=0, stop_index=100000):
         plt.xlabel("Forecast step")
         plt.ylabel("Methane rate")
         plt.legend()
-        plt.show()
+        os.makedirs("results/graphs", exist_ok=True)
+        plt.savefig(f"results/graphs/{target_name}_{timestamp}.png", dpi=150)
+        plt.close()
+        print(f"  Saved results/graphs/{target_name}_{timestamp}.png")
 
     # compute_metrics(pred_df, timestamp)
 
@@ -92,4 +104,9 @@ def run_pipeline(start_index=0, stop_index=100000):
 # rajouter les metrics dans le return aussi ... (à definir et computer)
 
 if __name__ == "__main__":
-    run_pipeline()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--start", type=int, default=0, help="Start row index")
+    parser.add_argument("--stop", type=int, default=1000000, help="Stop row index")
+    args = parser.parse_args()
+    run_pipeline(start_index=args.start, stop_index=args.stop)
