@@ -7,6 +7,7 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 
+# %pip install -U aeon NOTE: catch22 module, replaces pandas, scikit learn etc by lower versions to manage dependencies
 
 def cast_float_columns_to_float32(df: pd.DataFrame) -> pd.DataFrame:
     """Cast floating-point columns to float32 while leaving ints/datetimes unchanged."""
@@ -19,6 +20,50 @@ def cast_float_columns_to_float32(df: pd.DataFrame) -> pd.DataFrame:
 def load_data_local() -> pd.DataFrame:
     """loads the dataset from local repertory raw_data into a DataFrame"""
     return cast_float_columns_to_float32(pd.read_csv('raw_data/methane_data.csv'))
+
+
+def build_sequence_arrays(
+    feature_values: np.ndarray,
+    target_values: np.ndarray,
+    alert_values: np.ndarray,
+    input_steps: int,
+    forecast_horizon_in_sec: int,
+    step_size_in_sec: int = 1) -> tuple[np.ndarray, np.ndarray]:
+    """Build X/y sequence tensors using positional NumPy indexing only."""
+    if input_steps <= 0:
+        raise ValueError("input_steps must be > 0")
+    if forecast_horizon_in_sec <= 0:
+        raise ValueError("forecast_horizon_in_sec must be > 0")
+    if step_size_in_sec <= 0:
+        raise ValueError("step_size_in_sec must be > 0")
+
+    history_span = (input_steps - 1) * step_size_in_sec
+    trigger_positions = np.flatnonzero(alert_values == 1)
+
+    if trigger_positions.size == 0:
+        X_empty = np.empty((0, input_steps, feature_values.shape[1]), dtype=np.float32)
+        y_empty = np.empty((0, forecast_horizon_in_sec, target_values.shape[1]), dtype=np.float32)
+        return X_empty, y_empty
+
+    valid_positions = trigger_positions[
+        (trigger_positions >= history_span)
+        & (trigger_positions + forecast_horizon_in_sec < len(alert_values))]
+
+    if valid_positions.size == 0:
+        X_empty = np.empty((0, input_steps, feature_values.shape[1]), dtype=np.float32)
+        y_empty = np.empty((0, forecast_horizon_in_sec, target_values.shape[1]), dtype=np.float32)
+        return X_empty, y_empty
+
+    x_offsets = np.arange(-history_span, 1, step_size_in_sec, dtype=np.int32)
+    y_offsets = np.arange(1, forecast_horizon_in_sec + 1, dtype=np.int32)
+
+    X_indices = valid_positions[:, None] + x_offsets[None, :]
+    y_indices = valid_positions[:, None] + y_offsets[None, :]
+
+    X_array = feature_values[X_indices].astype(np.float32, copy=False)
+    y_array = target_values[y_indices].astype(np.float32, copy=False)
+
+    return X_array, y_array
 
 
 def preprocess_split(input_df: pd.DataFrame, test_size: float =0.3, alert_rate : float =1.0) -> tuple:
@@ -124,7 +169,7 @@ def preprocess_max(df: pd.DataFrame, test_size: float =0.3, alert_rate : float =
     return train_data, test_data, scalers
 
 
-def slice_arrays(df: pd.DataFrame, start_index, stop_index, window_length_in_sec: int =300, forecast_horizon_in_sec: int =120) -> tuple :
+def slice_arrays(df: pd.DataFrame, start_index: int = 0, stop_index: int | None = None, window_length_in_sec: int =300, forecast_horizon_in_sec: int =120) -> tuple :
     ''' creates a subset of the input dataframe - the observations between start_index and stop_index (excluded),
         prepares dataframe slices containing observations exceeding the alert_rate passed to function prerocess_split,
         the shape of the slices is governed by arguments window_length_in_sec and forecast_horizon_in_sec,
@@ -134,10 +179,9 @@ def slice_arrays(df: pd.DataFrame, start_index, stop_index, window_length_in_sec
     if input_length_in_sec <= 0:
         raise ValueError("window_length_in_sec must be > forecast_horizon_in_sec")
 
-    if not isinstance(df.index, pd.DatetimeIndex):
-        raise TypeError("slice_arrays expects df.index to be a DatetimeIndex")
-
     # Creates subset to limit training time initially
+    if stop_index is None:
+        stop_index = len(df)
     subset_df = df.iloc[start_index:stop_index]
 
     # Define columns to be included in X and y - eliminating columns not required for modelling
@@ -145,58 +189,142 @@ def slice_arrays(df: pd.DataFrame, start_index, stop_index, window_length_in_sec
     feature_cols = [c for c in subset_df.columns if c not in excluded_cols]
     target_cols = ['MM_RATE'] if 'MM_RATE' in subset_df.columns else ['MM256', 'MM263', 'MM264']
 
-    # Use boolean mask to identify index positions in which methane concentration exceeds the alert_rate
-    trigger_mask = (subset_df['ALERT'] == 1)
-    trigger_times = subset_df.index[trigger_mask]
-
-    if trigger_times.empty:
-        X_empty = np.empty((0, input_length_in_sec, len(feature_cols)), dtype=np.float32)
-        y_empty = np.empty((0, forecast_horizon_in_sec, len(target_cols)), dtype=np.float32)
-        return X_empty, y_empty
-
-    # Pull the sequences directly into NumPy arrays to avoid the large
-    # intermediate DataFrames created by repeated copy/concat operations.
-    subset_index = subset_df.index
+    # Pull the sequences into NumPy arrays and build windows from positional indices only.
     feature_values = subset_df.loc[:, feature_cols].to_numpy(dtype=np.float32, copy=False)
     target_values = subset_df.loc[:, target_cols].to_numpy(dtype=np.float32, copy=False)
-    one_second = pd.Timedelta(seconds=1)
+    alert_values = subset_df['ALERT'].to_numpy(copy=False)
+    del subset_df
 
-    X, y = [], []
-    for t0 in trigger_times:
-        X_times = pd.date_range(end=t0, periods=input_length_in_sec, freq='s')
-        y_times = pd.date_range(start=t0 + one_second, periods=forecast_horizon_in_sec, freq='s')
-
-        X_idx = subset_index.get_indexer(X_times)
-        y_idx = subset_index.get_indexer(y_times)
-
-        if (X_idx < 0).any() or (y_idx < 0).any():
-            continue
-
-        X.append(np.asarray(feature_values[X_idx], dtype=np.float32))
-        y.append(np.asarray(target_values[y_idx], dtype=np.float32))
+    X_array, y_array = build_sequence_arrays(
+        feature_values=feature_values,
+        target_values=target_values,
+        alert_values=alert_values,
+        input_steps=input_length_in_sec,
+        forecast_horizon_in_sec=forecast_horizon_in_sec,
+        step_size_in_sec=1,
+    )
 
     del feature_values
     del target_values
-    del trigger_mask
-    del trigger_times
-    del subset_df
-
-    if not X:
-        X_empty = np.empty((0, input_length_in_sec, len(feature_cols)), dtype=np.float32)
-        y_empty = np.empty((0, forecast_horizon_in_sec, len(target_cols)), dtype=np.float32)
-        gc.collect()
-        return X_empty, y_empty
-
-    X_array = np.stack(X)
-    y_array = np.stack(y)
-
-    del X
-    del y
+    del alert_values
     gc.collect()
 
     return X_array, y_array
 
 
+
+def preprocess_c22(df: pd.DataFrame, test_size: float =0.3, alert_rate : float =1.0, window_length_in_sec: int =300, forecast_horizon_in_sec: int =120, step_size_in_sec: int =10) -> tuple:
+    """ Preprocess function --> synthetic sensor features / train_test split / scaled values.
+        Takes as input a DataFrame and a test_size (defaulting to 0.3 when no test_size argument is passed). Uses NumPy to speed-up computations.
+        Aggregates the readings of the key Sensors in one synthetic measurement.
+        - For Methanometers, the synthetic indicator is the highest reading of the 3 critical methanometers (MM256, MM263, MM264).
+        - for other instruments (anemometers, barometers, air humidity captors, thermometers), the synthetic indicator is the average reading of the instruments.
+        WORK IN PROGRESS - TO BE UPDATED"""
+
+    input_length_in_sec = window_length_in_sec - forecast_horizon_in_sec
+    if input_length_in_sec <= 0:
+        raise ValueError("window_length_in_sec must be > forecast_horizon_in_sec")
+
+    if step_size_in_sec <= 0:
+        raise ValueError("step_size_in_sec must be > 0")
+
+    # Create a copy of the initial DataFrame before editing it
+    df = df.copy()
+
+    # Row order is the implicit time axis, so we can drop the calendar columns
+    # instead of creating a DatetimeIndex just for sequence construction.
+    df.drop(columns=['year', 'month', 'day', 'hour', 'minute', 'second'], inplace=True)
+
+    # Replace 5 columns on current intensity in 5 motors by one average indication
+    df['AMP_AVG'] = df[['AMP1_IR', 'AMP2_IR', 'DMP3_IR', 'DMP4_IR', 'AMP5_IR']].mean(axis=1)
+    df.drop(columns=['AMP1_IR', 'AMP2_IR', 'DMP3_IR', 'DMP4_IR', 'AMP5_IR'], inplace=True)
+
+    # Create a synthetic indicator for methane concentration - the highest reading of the MM256, MM263, MM264 group
+    df['MM_RATE'] = df[['MM256', 'MM263', 'MM264']].max(axis=1)
+    df.drop(columns=['MM256', 'MM263', 'MM264'], inplace=True)
+
+    # Create a synthetic indicator for airflow speed - the average reading of the AN422, AN423 group
+    df['AN_RATE'] = df[['AN422', 'AN423']].mean(axis=1)
+    df.drop(columns=['AN422', 'AN423'], inplace=True)
+
+    # Create a synthetic indicator for temperature - the average reading of the TP1711, TP1721 group
+    df['TP_RATE'] = df[['TP1711', 'TP1721']].mean(axis=1)
+    df.drop(columns=['TP1711', 'TP1721'], inplace=True)
+
+    # Create a synthetic indicator for air humidity - the average reading of the RH1712, RH1722 group
+    df['RH_RATE'] = df[['RH1712', 'RH1722']].mean(axis=1)
+    df.drop(columns=['RH1712', 'RH1722'], inplace=True)
+
+    # Create a synthetic indicator for athmospheric pressure - the average reading of the BA1713, BA1723 group
+    df['BA_RATE'] = df[['BA1713', 'BA1723']].mean(axis=1)
+    df.drop(columns=['BA1713', 'BA1723'], inplace=True)
+
+    # Cast floating values as float32 to save memory and speed-up computation
+    df = cast_float_columns_to_float32(df)
+
+    # Create a binary flag for observations in which methane concentration exceeds the alert_rate: 1 means observation above alert_rate
+    df["ALERT"] = df['MM_RATE'].ge(alert_rate).astype(int)
+
+    # Define columns to be included in X and y - eliminating columns not required for modelling
+    excluded_cols = ['datetime', 'slice_id', 'trigger_time', 't_rel_s', 'ALERT']
+    feature_cols = [c for c in df.columns if c not in excluded_cols]
+    target_cols = ['MM_RATE']
+
+    # Pull the sequences directly into NumPy arrays
+    input_steps = int(np.ceil(input_length_in_sec / step_size_in_sec))
+    feature_values = df.loc[:, feature_cols].to_numpy(dtype=np.float32, copy=False)
+    target_values = df.loc[:, target_cols].to_numpy(dtype=np.float32, copy=False)
+    alert_values = df['ALERT'].to_numpy(copy=False)
+
+    # Delete computation results we no longer need (free up memory)
+    X_array, y_array = build_sequence_arrays(
+        feature_values=feature_values,
+        target_values=target_values,
+        alert_values=alert_values,
+        input_steps=input_steps,
+        forecast_horizon_in_sec=forecast_horizon_in_sec,
+        step_size_in_sec=step_size_in_sec,
+    )
+
+    del feature_values
+    del target_values
+    del alert_values
+    del df
+    gc.collect()
+
+    # Split X_array and y_array into train and test datasets
+    X_train, X_test, y_train, y_test = train_test_split(X_array, y_array, test_size=test_size, shuffle=False)
+
+    # Imports to add engineered features with aeon.catch22 (may require running previously: %pip install -U aeon)
+    from aeon.transformations.collection.feature_based import Catch22
+
+    # Create catch22 features
+    c22_mv = Catch22(replace_nans=True)
+    X_train_transformed = np.asarray(c22_mv.fit_transform(X_train), dtype=np.float32)
+    X_test_transformed = np.asarray(c22_mv.transform(X_test), dtype=np.float32)
+
+    # Scale transformed features without data leakage.
+    scalers = {}
+    X_train_scaled = np.empty_like(X_train_transformed, dtype=np.float32)
+    X_test_scaled = np.empty_like(X_test_transformed, dtype=np.float32)
+
+    for feature_idx in range(X_train_transformed.shape[1]):
+        mm_scaler = MinMaxScaler()
+        X_train_scaled[:, [feature_idx]] = mm_scaler.fit_transform(
+            X_train_transformed[:, [feature_idx]]
+        ).astype(np.float32)
+        X_test_scaled[:, [feature_idx]] = mm_scaler.transform(
+            X_test_transformed[:, [feature_idx]]
+        ).astype(np.float32)
+        scalers[feature_idx] = mm_scaler
+
+    return (
+        X_train_scaled,
+        y_train.astype(np.float32, copy=False),
+        X_test_scaled,
+        y_test.astype(np.float32, copy=False),
+        scalers,
+    )
 
 
 # We initially thought this would be useful to train the model - EDA helped us realize this wasn't a good option
