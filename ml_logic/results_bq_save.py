@@ -44,7 +44,104 @@ def save_history_to_bq(history, timestamp=None, table_suffix=None):
     return table_ref
 
 
-def save_predictions_to_bq(y_test, y_pred, timestamp=None, sensors=None, table_suffix=None):
+def _attach_window_timestamps(pred_df: pd.DataFrame, window_index: pd.DataFrame) -> pd.DataFrame:
+    """Attach per-row forecast timestamps using one metadata row per sample_id."""
+    required_cols = {
+        "sample_id",
+        "input_start_time",
+        "input_end_time",
+        "target_start_time",
+        "target_end_time",
+    }
+    missing = required_cols.difference(window_index.columns)
+    if missing:
+        raise ValueError(
+            f"window_index is missing required columns: {sorted(missing)}"
+        )
+
+    sample_count = int(pred_df["sample_id"].max()) + 1 if not pred_df.empty else 0
+    ordered_index = (
+        window_index.loc[:, sorted(required_cols)]
+        .drop_duplicates(subset=["sample_id"])
+        .set_index("sample_id")
+        .sort_index()
+    )
+    expected_sample_ids = pd.Index(np.arange(sample_count), name="sample_id")
+    ordered_index = ordered_index.reindex(expected_sample_ids)
+    if ordered_index.isnull().any(axis=None):
+        raise ValueError("window_index does not align with prediction sample_id values")
+
+    sample_meta = pred_df["sample_id"].to_numpy(dtype=np.int64, copy=False)
+    forecast_steps = pred_df["forecast_step"].to_numpy(dtype=np.int64, copy=False)
+
+    input_start = pd.to_datetime(
+        ordered_index.loc[sample_meta, "input_start_time"].to_numpy()
+    )
+    input_end = pd.to_datetime(
+        ordered_index.loc[sample_meta, "input_end_time"].to_numpy()
+    )
+    target_start = pd.to_datetime(
+        ordered_index.loc[sample_meta, "target_start_time"].to_numpy()
+    )
+    target_end = pd.to_datetime(
+        ordered_index.loc[sample_meta, "target_end_time"].to_numpy()
+    )
+    target_time = target_start + pd.to_timedelta(forecast_steps, unit="s")
+
+    pred_df = pred_df.copy()
+    pred_df["input_start_time"] = input_start
+    pred_df["forecast_origin_time"] = input_end
+    pred_df["target_start_time"] = target_start
+    pred_df["target_time"] = target_time
+    pred_df["target_end_time"] = target_end
+    pred_df["target_date"] = pd.to_datetime(target_time).date
+    return pred_df
+
+
+def build_prediction_frame(
+    y_test,
+    y_pred,
+    timestamp=None,
+    sensors=None,
+    window_index: pd.DataFrame | None = None,
+):
+    """Build the long prediction dataframe used for CSV export and BigQuery."""
+    if sensors is None:
+        sensors = SENSORS_DEFAULT
+    if not timestamp:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    columns = ["sample_id", "forecast_step", "sensor", "actual", "predicted", "residual", "run_timestamp"]
+    if y_test.size == 0 or y_pred.size == 0:
+        return pd.DataFrame(columns=columns)
+
+    sample_count, horizon, sensor_count = y_test.shape
+    actual = y_test.reshape(-1)
+    predicted = y_pred.reshape(-1)
+    pred_df = pd.DataFrame({
+        "sample_id": np.repeat(np.arange(sample_count), horizon * sensor_count),
+        "forecast_step": np.tile(np.repeat(np.arange(horizon), sensor_count), sample_count),
+        "sensor": np.tile(np.array(sensors[:sensor_count]), sample_count * horizon),
+        "actual": actual.astype(float),
+        "predicted": predicted.astype(float),
+        "residual": (actual - predicted).astype(float),
+    })
+    pred_df["run_timestamp"] = timestamp
+
+    if window_index is not None:
+        pred_df = _attach_window_timestamps(pred_df, window_index)
+
+    return pred_df
+
+
+def save_predictions_to_bq(
+    y_test,
+    y_pred,
+    timestamp=None,
+    sensors=None,
+    table_suffix=None,
+    window_index: pd.DataFrame | None = None,
+):
     """Save predictions vs actuals for each sensor to a timestamped BQ table.
 
     Parameters
@@ -60,33 +157,25 @@ def save_predictions_to_bq(y_test, y_pred, timestamp=None, sensors=None, table_s
         Pass ``["MM256"]`` for the single-sensor MM256 pipeline.
     table_suffix : str, optional
         Extra suffix for the BQ table name.
+    window_index : pd.DataFrame, optional
+        One metadata row per sample_id. When provided, forecast timestamps are
+        added to the exported table so downstream queries can filter by date.
     """
-    if sensors is None:
-        sensors = SENSORS_DEFAULT
-
     project = get_secret("GCP_PROJECT")
     dataset = get_secret("BQ_DATASET")
     region = get_secret("BQ_REGION")
     if not timestamp:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    columns = ["sample_id", "forecast_step", "sensor", "actual", "predicted", "residual", "run_timestamp"]
-    if y_test.size == 0 or y_pred.size == 0:
+    pred_df = build_prediction_frame(
+        y_test,
+        y_pred,
+        timestamp=timestamp,
+        sensors=sensors,
+        window_index=window_index,
+    )
+    if pred_df.empty:
         print("Predictions skipped: no test windows available.")
-        return pd.DataFrame(columns=columns)
-
-    sample_count, horizon, sensor_count = y_test.shape
-    actual = y_test.reshape(-1)
-    predicted = y_pred.reshape(-1)
-    pred_df = pd.DataFrame({
-        "sample_id": np.repeat(np.arange(sample_count), horizon * sensor_count),
-        "forecast_step": np.tile(np.repeat(np.arange(horizon), sensor_count), sample_count),
-        "sensor": np.tile(np.array(sensors[:sensor_count]), sample_count * horizon),
-        "actual": actual.astype(float),
-        "predicted": predicted.astype(float),
-        "residual": (actual - predicted).astype(float),
-    })
-    pred_df["run_timestamp"] = timestamp
+        return pred_df
 
     suffix = f"_{table_suffix}" if table_suffix else ""
     table_ref = f"{project}.{dataset}.predictions{suffix}_{timestamp}"

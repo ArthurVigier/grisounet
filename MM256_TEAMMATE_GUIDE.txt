@@ -1,0 +1,174 @@
+MM256 workflow quick guide
+=========================
+
+Repository purpose
+------------------
+This repository contains the methane modeling workflow. The MM256 pipeline is
+the single-sensor version focused on the MM256 methanometer.
+
+
+Main folders
+------------
+- interface/
+  CLI entrypoints. Start here if you want to run a workflow.
+
+- scripts/
+  Task-oriented pipeline code: preprocessing, cross-validation, final training,
+  plotting helpers for MM256, and analysis utilities.
+
+- ml_logic/
+  Shared logic reused by workflows: model definitions, BigQuery save helpers,
+  plotting helpers, data loading, secrets, and model export.
+
+- results/
+  Local outputs created by runs.
+  Important subfolders:
+  - results/cv_metrics/
+  - results/final_metrics/
+  - results/graphs/
+  - results/logs/
+  - results/predictions/
+  - results/model_history/
+
+
+Most important MM256 files
+--------------------------
+- interface/workflow_mm256.py
+  Main MM256 CLI. Use this to run preprocessing, CV, or the full workflow.
+
+- scripts/preprocessor_MM256.py
+  MM256-only preprocessing.
+  It filters active days, drops the other methanometers, creates ALERT, and
+  builds MM256 windows.
+
+- scripts/cv_time_series.py
+  Time-series cross-validation for MM256.
+  Pinball q=0.9 is the primary metric. MAE/RMSE are optional diagnostics.
+
+- scripts/train_final_mm256.py
+  Final train/test run after CV. Also produces final plots and optional BQ
+  upload.
+
+- ml_logic/model_mm256.py
+  MM256 model architectures.
+  The current workflow can use a sequence branch plus a catch22 static branch.
+
+- ml_logic/results_bq_save.py
+  BigQuery export logic for training history and predictions.
+
+- ml_logic/analysis.py
+  Shared graph helpers for loss curves and predictions vs actual.
+
+- scripts/visualize_mm256_day.py
+  Useful when you want to inspect one specific date after a run.
+
+
+How the MM256 workflow works
+----------------------------
+1. Load the modeling table.
+2. Keep only days where MM256 is active.
+3. Build MM256 windows.
+4. Optionally compute catch22 features from each window.
+5. Run time-series CV.
+6. Train a final model on the train split.
+7. Evaluate on the holdout split.
+8. Save metrics, plots, model artifacts, and optionally upload predictions to
+   BigQuery.
+
+
+Default run commands
+--------------------
+Run from the repository root:
+
+python interface/workflow_mm256.py --mode full --source cache
+
+Useful variants:
+
+- Full run with explicit catch22:
+  python interface/workflow_mm256.py --mode full --source cache --use-catch22
+
+- Full run with extra diagnostics:
+  python interface/workflow_mm256.py --mode full --source cache --include-secondary-diagnostics
+
+- Full run with CV plots and final plots:
+  python interface/workflow_mm256.py --mode full --source cache --save-cv-plots --save-final-analysis
+
+- Full run with BigQuery upload:
+  python interface/workflow_mm256.py --mode full --source cache --push-bq
+
+- CV only:
+  python interface/workflow_mm256.py --mode cv --source cache
+
+
+What to inspect after a run
+---------------------------
+- results/logs/
+  Full console logs from each run.
+
+- results/cv_metrics/
+  Fold-level CV metrics and aggregated CV summaries.
+
+- results/final_metrics/
+  Final holdout metrics.
+
+- results/graphs/
+  Final forecast plots, loss curves, and prediction-vs-actual plots.
+
+
+Where the graphs are produced
+-----------------------------
+- Final MM256 plots:
+  scripts/train_final_mm256.py
+
+- CV plots:
+  scripts/cv_time_series.py
+
+- Shared plotting helpers:
+  ml_logic/analysis.py
+
+- Day-level visual inspection:
+  scripts/visualize_mm256_day.py
+
+
+BigQuery notes
+--------------
+BigQuery config comes from .env:
+- project: spheric-voyager-484810-k0
+- dataset: grisou_eu
+- source table: spheric-voyager-484810-k0.grisou_eu.Table_grisou
+
+Prediction tables created by the MM256 final workflow use this pattern:
+- history_mm256_final_<timestamp>
+- predictions_mm256_final_<timestamp>
+
+Important:
+- Predictions are uploaded only if --push-bq is passed.
+- In the latest code, MM256 prediction exports include forecast timestamps so
+  downstream users can query by date. Look for columns such as:
+  - forecast_origin_time
+  - target_start_time
+  - target_time
+  - target_end_time
+  - target_date
+
+
+Recommended query pattern for teammates
+---------------------------------------
+Once a predictions_mm256_final_<timestamp> table exists, the teammate should
+query by target_date or target_time, for example:
+
+SELECT *
+FROM `spheric-voyager-484810-k0.grisou_eu.predictions_mm256_final_<timestamp>`
+WHERE sensor = 'MM256'
+  AND target_date = DATE '2014-05-24'
+ORDER BY target_time, forecast_step;
+
+
+Practical navigation advice
+---------------------------
+- If you want to run the pipeline: start in interface/workflow_mm256.py
+- If preprocessing looks wrong: inspect scripts/preprocessor_MM256.py
+- If CV metrics look wrong: inspect scripts/cv_time_series.py
+- If final outputs / BQ export look wrong: inspect scripts/train_final_mm256.py
+- If model behavior looks wrong: inspect ml_logic/model_mm256.py
+- If plots are missing: inspect ml_logic/analysis.py and results/graphs/

@@ -18,31 +18,36 @@ from ml_logic.analysis import compute_metrics, plot_loss_curves, plot_prediction
 from ml_logic.data import save_preprocessing_artifact
 from ml_logic.model_mm256 import build_mm256_model
 from ml_logic.model_save import save_model_artifacts_to_gcs, save_model_to_gcs
-from ml_logic.results_bq_save import save_history_to_bq, save_predictions_to_bq
+from ml_logic.results_bq_save import (
+    build_prediction_frame,
+    save_history_to_bq,
+    save_predictions_to_bq,
+)
 from scripts.cv_time_series import build_last_input_baseline, compute_mm256_metrics, inference_batch_size
 from scripts.preprocessor_MM256 import (
     TARGET_SENSOR,
     build_mm256_model_inputs,
+    build_window_index_mm256,
     fit_transform_catch22_windows,
     scale_fold,
     slice_windows_mm256,
 )
 
 
-def _build_prediction_df(y_true: np.ndarray, y_pred: np.ndarray, timestamp: str, table_suffix: str) -> pd.DataFrame:
-    sample_count, horizon, sensor_count = y_true.shape
-    actual = y_true.reshape(-1)
-    predicted = y_pred.reshape(-1)
-    pred_df = pd.DataFrame({
-        "sample_id": np.repeat(np.arange(sample_count), horizon * sensor_count),
-        "forecast_step": np.tile(np.repeat(np.arange(horizon), sensor_count), sample_count),
-        "sensor": np.tile(np.array([TARGET_SENSOR]), sample_count * horizon),
-        "actual": actual.astype(float),
-        "predicted": predicted.astype(float),
-        "residual": (actual - predicted).astype(float),
-        "run_timestamp": timestamp,
-    })
-
+def _build_prediction_df(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    timestamp: str,
+    table_suffix: str,
+    window_index: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    pred_df = build_prediction_frame(
+        y_true,
+        y_pred,
+        timestamp=timestamp,
+        sensors=[TARGET_SENSOR],
+        window_index=window_index,
+    )
     os.makedirs("results/predictions", exist_ok=True)
     pred_path = f"results/predictions/predictions_{table_suffix}_{timestamp}.csv"
     pred_df.to_csv(pred_path, index=False)
@@ -109,16 +114,28 @@ def train_final_mm256(
         window_length,
         forecast_horizon,
     )
+    test_window_index = build_window_index_mm256(
+        test_df,
+        0,
+        len(test_df),
+        window_length,
+        forecast_horizon,
+    )
     X_train_c22 = None
     X_test_c22 = None
 
     print(f"  X_train: {X_train.shape}, y_train: {y_train.shape}")
     print(f"  X_test:  {X_test.shape},  y_test:  {y_test.shape}")
+    print(f"  Window index rows: {len(test_window_index)}")
 
     if X_train.shape[0] == 0:
         return {"error": "no_training_windows"}
     if X_test.shape[0] == 0:
         return {"error": "no_test_windows"}
+    if len(test_window_index) != X_test.shape[0]:
+        raise ValueError(
+            "MM256 test window index does not match the number of generated test windows"
+        )
 
     catch22_scalers = None
     catch22_meta = {"enabled": False, "n_catch22_features": 0}
@@ -236,10 +253,17 @@ def train_final_mm256(
             timestamp,
             sensors=[TARGET_SENSOR],
             table_suffix="mm256_final",
+            window_index=test_window_index,
         )
     elif save_analysis_outputs:
         _save_history_local(history, timestamp, "mm256_final")
-        pred_df = _build_prediction_df(y_test, y_pred, timestamp, "mm256_final")
+        pred_df = _build_prediction_df(
+            y_test,
+            y_pred,
+            timestamp,
+            "mm256_final",
+            window_index=test_window_index,
+        )
 
     sample_plot_path = None
     metrics_df = pd.DataFrame([{"sensor": TARGET_SENSOR, **model_metrics}])
