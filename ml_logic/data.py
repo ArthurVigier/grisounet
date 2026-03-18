@@ -159,7 +159,7 @@ def save_preprocessing_to_bq(X_train, X_test, y_train, y_test):
     Saves preprocessing results to a timestamped BigQuery table.
     """
     project = get_secret("GCP_PROJECT")
-    dataset = get_secret("BQ_DATASET")
+    dataset = get_secret("BQ_OUTPUT_DATASET") or get_secret("BQ_DATASET")
     region = get_secret("BQ_REGION")
     timestamp = _timestamp()
     table_name = f"preprocess_{timestamp}"

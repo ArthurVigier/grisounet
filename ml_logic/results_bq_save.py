@@ -22,7 +22,7 @@ def save_history_to_bq(history, timestamp=None, table_suffix=None):
         ``history_{timestamp}`` for backward compatibility.
     """
     project = get_secret("GCP_PROJECT")
-    dataset = get_secret("BQ_DATASET")
+    dataset = get_secret("BQ_OUTPUT_DATASET") or get_secret("BQ_DATASET")
     region = get_secret("BQ_REGION")
     if not timestamp:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -162,7 +162,7 @@ def save_predictions_to_bq(
         added to the exported table so downstream queries can filter by date.
     """
     project = get_secret("GCP_PROJECT")
-    dataset = get_secret("BQ_DATASET")
+    dataset = get_secret("BQ_OUTPUT_DATASET") or get_secret("BQ_DATASET")
     region = get_secret("BQ_REGION")
     if not timestamp:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

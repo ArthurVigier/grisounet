@@ -588,7 +588,7 @@ def _push_cv_results_to_bq(metrics_df: pd.DataFrame, agg: dict, timestamp: str):
     from google.cloud import bigquery
 
     project = get_secret("GCP_PROJECT")
-    dataset = get_secret("BQ_DATASET")
+    dataset = get_secret("BQ_OUTPUT_DATASET") or get_secret("BQ_DATASET")
     region = get_secret("BQ_REGION")
     client = bigquery.Client(project=project, location=region)
 
