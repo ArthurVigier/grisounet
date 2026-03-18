@@ -27,10 +27,6 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 
-# ---------------------------------------------------------------------------
-# Ensure the project root is on sys.path so ml_logic imports work when
-# running the script directly (python scripts/preprocessor_MM256.py).
-# ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 if PROJECT_ROOT not in sys.path:
@@ -40,45 +36,20 @@ from ml_logic.data import load_modeling_dataframe
 from ml_logic.data_cleaning import clean_dataframe
 from ml_logic.secrets import get_secret
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 TARGET_SENSOR = "MM256"
 
-# Sensors that are NOT relevant when focusing on MM256 alone.
-# We exclude the other methanometers from features to avoid
-# information leakage (they are highly correlated and would mask the signal
-# we want MM256 to learn from environmental predictors).
 SENSORS_TO_DROP = ["MM263", "MM264", "MM252", "MM261", "MM262", "MM211"]
-
-# Motor current columns that will be replaced by a single average.
 AMP_COLS = ["AMP1_IR", "AMP2_IR", "DMP3_IR", "DMP4_IR", "AMP5_IR"]
 
 SEQUENCE_INPUT_NAME = "sequence_input"
 CATCH22_INPUT_NAME = "catch22_input"
 
 
-# ---------------------------------------------------------------------------
-# 1. Identify "active days" — days where MM256 >= concentration_threshold
-# ---------------------------------------------------------------------------
 def identify_active_days(
     df: pd.DataFrame,
     concentration_threshold: float = 1.0,
 ) -> pd.DataFrame:
-    """Return a DataFrame of unique dates where MM256 peaked above the threshold.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Raw dataframe with a DatetimeIndex named 'time'.
-    concentration_threshold : float
-        Minimum peak MM256 value (% vol) for a day to be considered "active".
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns: [date, day_peak_mm256, n_seconds_above]
-    """
+    """Return unique dates where MM256 peaked above the threshold."""
     daily = df.groupby(df.index.date).agg(
         day_peak_mm256=(TARGET_SENSOR, "max"),
         n_seconds_above=(TARGET_SENSOR, lambda s: (s >= concentration_threshold).sum()),
@@ -89,35 +60,16 @@ def identify_active_days(
     return active
 
 
-# ---------------------------------------------------------------------------
-# 2. Filter the full dataset to active days only
-# ---------------------------------------------------------------------------
 def filter_to_active_days(
     df: pd.DataFrame,
     active_days: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Keep only rows whose date appears in *active_days*.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Full dataset with DatetimeIndex.
-    active_days : pd.DataFrame
-        Output of ``identify_active_days`` — must contain a ``date`` column.
-
-    Returns
-    -------
-    pd.DataFrame
-        Filtered copy of *df*.
-    """
+    """Keep only rows whose date appears in active_days."""
     active_dates = pd.to_datetime(active_days["date"])
     keep = df.index.normalize().isin(active_dates)
     return df.loc[keep].copy()
 
 
-# ---------------------------------------------------------------------------
-# 3. Main preprocessing entry point
-# ---------------------------------------------------------------------------
 def preprocess_mm256(
     source: str = "cache",
     cache_raw: bool = False,
@@ -128,62 +80,24 @@ def preprocess_mm256(
     frozen_sensor_window: int = 3600,
     sensor_disagreement_z_threshold: float = 6.0,
 ) -> tuple:
-    """Load data, filter to active days, engineer features, and optionally scale.
-
-    Parameters
-    ----------
-    source : str
-        Data source ("bq", "cache", or "local").
-    cache_raw : bool
-        Whether to cache a local CSV snapshot when pulling from BQ.
-    alert_rate : float
-        Methane concentration (% vol) above which the ALERT binary flag = 1.
-        This governs which timestamps become window "trigger points" during
-        slicing.  Should equal *concentration_threshold* for consistency.
-    concentration_threshold : float
-        Minimum daily peak MM256 value to include a day.  Days where MM256
-        never reaches this value are entirely excluded.
-    scale : bool
-        If True, fit MinMaxScaler on the full filtered dataset.
-        If False, return the unscaled dataframe so a downstream caller can
-        fit scalers on train folds / train split only.
-    clean_abnormal_values : bool
-        If True, run anomaly cleaning before MM256-specific preprocessing and
-        drop rows flagged as abnormal.
-    frozen_sensor_window : int
-        Frozen-sensor detection horizon in seconds. Default is 3600 (60 min).
-    sensor_disagreement_z_threshold : float
-        Accepted z-score gap between co-located sensors before a disagreement
-        row is flagged and removed.
-
-    Returns
-    -------
-    (processed_df, scalers, metadata)
-        processed_df : pd.DataFrame
-            DataFrame with DatetimeIndex, ready for slicing into (X, y)
-            windows. Scaled if ``scale=True``, otherwise left unscaled.
-        scalers : dict
-            {column_name: fitted MinMaxScaler}. Empty when ``scale=False``.
-        metadata : dict
-            Diagnostic information (active_days DataFrame, row counts, etc.).
-    """
-    # ---- Load raw data ----
+    """Load data, filter to active days, engineer features, and optionally scale."""
     print(f"\n{'='*60}")
     print(f"  Preprocessor MM256 — threshold >= {concentration_threshold}%")
     print(f"{'='*60}\n")
 
     raw_df = load_modeling_dataframe(source=source, cache_raw=cache_raw)
 
-    # ---- Build DatetimeIndex ----
     df = raw_df.copy()
     df["time"] = pd.to_datetime(df[["year", "month", "day", "hour", "minute", "second"]])
     df.set_index("time", inplace=True)
     df.drop(columns=["year", "month", "day", "hour", "minute", "second"], inplace=True)
+
     if not df.index.is_monotonic_increasing:
-        # Temporal splits and contiguous-window extraction both assume sorted rows.
         df.sort_index(inplace=True)
         print("Sorted rows by timestamp to restore chronological order.")
-    df["CR863"] = df["CR863"].astype(np.float32)
+
+    if "CR863" in df.columns:
+        df["CR863"] = df["CR863"].astype(np.float32)
 
     total_rows = len(df)
     print(f"Total rows loaded: {total_rows:,}")
@@ -196,6 +110,7 @@ def preprocess_mm256(
         "rows_after_cleaning": int(total_rows),
         "rows_removed": 0,
     }
+
     if clean_abnormal_values:
         print(
             "Running anomaly cleaning before MM256 preprocessing"
@@ -217,37 +132,31 @@ def preprocess_mm256(
             f" ({cleaned_rows / total_rows * 100:.1f}% kept)"
         )
 
-    # ---- Identify and filter to active days ----
     active_days = identify_active_days(df, concentration_threshold)
     print(f"Active days (MM256 peak >= {concentration_threshold}%): {len(active_days)}")
-    print(f"  Date range: {active_days['date'].min()} to {active_days['date'].max()}")
+    if len(active_days) > 0:
+        print(f"  Date range: {active_days['date'].min()} to {active_days['date'].max()}")
 
     df = filter_to_active_days(df, active_days)
     active_rows = len(df)
-    print(f"Rows after day filter: {active_rows:,} ({active_rows/total_rows*100:.1f}%)")
+    print(f"Rows after day filter: {active_rows:,} ({active_rows / total_rows * 100:.1f}%)")
 
-    # ---- Drop other methanometers (prevent information leakage) ----
     cols_to_drop = [c for c in SENSORS_TO_DROP if c in df.columns]
     df.drop(columns=cols_to_drop, inplace=True)
 
-    # ---- Aggregate motor currents ----
     amp_present = [c for c in AMP_COLS if c in df.columns]
     if amp_present:
         df["AMP_AVG"] = df[amp_present].mean(axis=1)
         df.drop(columns=amp_present, inplace=True)
 
-    # ---- Create ALERT flag: MM256 >= alert_rate ----
     df["ALERT"] = (df[TARGET_SENSOR] >= alert_rate).astype(np.int8)
-    n_alert = df["ALERT"].sum()
-    print(f"Alert rows (MM256 >= {alert_rate}%): {n_alert:,} "
-          f"({n_alert/active_rows*100:.2f}%)")
+    n_alert = int(df["ALERT"].sum())
+    print(f"Alert rows (MM256 >= {alert_rate}%): {n_alert:,} ({n_alert / active_rows * 100:.2f}%)")
 
-    # ---- Cast to float32 ----
     float_cols = df.select_dtypes(include=["floating"]).columns
     if len(float_cols) > 0:
         df[float_cols] = df[float_cols].astype(np.float32)
 
-    # ---- Optional full-data scaling ----
     scalers = {}
     if scale:
         features_to_scale = df.select_dtypes(include=["floating"]).columns
@@ -260,6 +169,12 @@ def preprocess_mm256(
     print(f"Feature columns ({len(feature_cols)}): {feature_cols}")
     print(f"Target: {TARGET_SENSOR}")
     print(f"Scaled: {scale}")
+
+    if len(df) > 1:
+        deltas = df.index.to_series().diff()
+        print(f"Median timestep: {deltas.median()}")
+        print(f"Max timestep:    {deltas.max()}")
+        print(f"Duplicate timestamps: {int(df.index.duplicated().sum()):,}")
 
     metadata = {
         "target_sensor": TARGET_SENSOR,
@@ -277,38 +192,21 @@ def preprocess_mm256(
     return df, scalers, metadata
 
 
-# ---------------------------------------------------------------------------
-# 4. Windowing / slicing for MM256 (single-sensor target)
-# ---------------------------------------------------------------------------
 def slice_windows_mm256(
     df: pd.DataFrame,
     start_index: int = 0,
     stop_index: int | None = None,
     window_length_in_sec: int = 300,
     forecast_horizon_in_sec: int = 120,
+    require_alert_trigger: bool = True,
+    debug: bool = False,
 ) -> tuple:
-    """Create (X, y) window pairs centered on ALERT triggers.
+    """
+    Create (X, y) window pairs for MM256 forecasting.
 
-    Identical logic to ``ml_logic.preprocessor.slice_arrays`` but with a
-    single-sensor target (MM256 only), producing y of shape
-    ``(n_samples, forecast_horizon, 1)``.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Preprocessed DataFrame with DatetimeIndex and an ALERT column.
-    start_index, stop_index : int
-        Row range to consider.
-    window_length_in_sec : int
-        Total window size (input + forecast).
-    forecast_horizon_in_sec : int
-        Number of seconds to forecast ahead.
-
-    Returns
-    -------
-    (X, y) : tuple of np.ndarray
-        X: (n_samples, input_length, n_features)  float32
-        y: (n_samples, forecast_horizon, 1)        float32
+    By default, keep only windows whose trigger timestamp (last timestep of the
+    input sequence) has ALERT==1. For debugging, this can be disabled with
+    require_alert_trigger=False to keep every valid contiguous window.
     """
     if stop_index is None:
         stop_index = len(df)
@@ -325,40 +223,69 @@ def slice_windows_mm256(
     feature_cols = [c for c in subset.columns if c not in excluded]
     target_cols = [TARGET_SENSOR]
 
+    empty_X = np.empty((0, input_length, len(feature_cols)), dtype=np.float32)
+    empty_y = np.empty((0, forecast_horizon_in_sec, 1), dtype=np.float32)
+
     if subset.empty:
-        return (
-            np.empty((0, input_length, len(feature_cols)), dtype=np.float32),
-            np.empty((0, forecast_horizon_in_sec, 1), dtype=np.float32),
-        )
+        if debug:
+            print("[slice_windows_mm256] subset is empty")
+        return empty_X, empty_y
 
     feat_vals = subset[feature_cols].to_numpy(dtype=np.float32, copy=False)
     tgt_vals = subset[target_cols].to_numpy(dtype=np.float32, copy=False)
     alert_vals = subset["ALERT"].to_numpy(dtype=bool, copy=False)
-    timestamp_ns = subset.index.asi8
     total_window = input_length + forecast_horizon_in_sec
 
-    if not alert_vals.any():
-        return (
-            np.empty((0, input_length, len(feature_cols)), dtype=np.float32),
-            np.empty((0, forecast_horizon_in_sec, 1), dtype=np.float32),
-        )
+    deltas = subset.index.to_series().diff()
+    one_second = pd.Timedelta(seconds=1)
 
-    segment_breaks = np.flatnonzero(np.diff(timestamp_ns) != 1_000_000_000) + 1
-    segment_starts = np.concatenate(([0], segment_breaks))
-    segment_stops = np.concatenate((segment_breaks, [len(subset)]))
+    break_mask = deltas.ne(one_second).to_numpy().copy()
+    break_mask[0] = True
+    segment_starts = np.flatnonzero(break_mask)
+    segment_stops = np.concatenate((segment_starts[1:], [len(subset)]))
+    segment_lengths = segment_stops - segment_starts
+
+    if debug:
+        print("\n[slice_windows_mm256] DEBUG")
+        print(f"  subset rows:           {len(subset):,}")
+        print(f"  feature columns:       {len(feature_cols)}")
+        print(f"  input_length:          {input_length}")
+        print(f"  forecast_horizon:      {forecast_horizon_in_sec}")
+        print(f"  total_window:          {total_window}")
+        print(f"  alert rows in subset:  {int(alert_vals.sum()):,}")
+        print(f"  require_alert_trigger: {require_alert_trigger}")
+        print(f"  n_segments:            {len(segment_starts):,}")
+        print(f"  longest_segment:       {int(segment_lengths.max()):,}")
+        print(f"  shortest_segment:      {int(segment_lengths.min()):,}")
+        print(f"  segments >= window:    {int((segment_lengths >= total_window).sum()):,}")
+
+        delta_counts = deltas.value_counts(dropna=False).head(10)
+        print("  top timestep counts:")
+        for delta_val, count in delta_counts.items():
+            print(f"    {delta_val}: {int(count):,}")
+
+    if require_alert_trigger and not alert_vals.any():
+        if debug:
+            print("  no ALERT rows in subset -> returning empty")
+        return empty_X, empty_y
 
     X_chunks, y_chunks = [], []
+
+    total_segments_considered = 0
+    total_segments_too_short = 0
+    total_candidates = 0
+    total_trigger_candidates = 0
+    total_valid_offsets = 0
+
     for seg_start, seg_stop in zip(segment_starts, segment_stops):
         seg_len = seg_stop - seg_start
         if seg_len < total_window:
+            total_segments_too_short += 1
             continue
 
+        total_segments_considered += 1
         n_candidates = seg_len - total_window + 1
-        trigger_candidates = alert_vals[
-            seg_start + input_length - 1 : seg_start + input_length - 1 + n_candidates
-        ]
-        if not trigger_candidates.any():
-            continue
+        total_candidates += n_candidates
 
         feat_segment = feat_vals[seg_start:seg_stop]
         tgt_segment = tgt_vals[seg_start:seg_stop]
@@ -374,23 +301,47 @@ def slice_windows_mm256(
             axis=0,
         )
 
-        valid_offsets = np.flatnonzero(trigger_candidates)
+        if require_alert_trigger:
+            trigger_candidates = alert_vals[
+                seg_start + input_length - 1 : seg_start + input_length - 1 + n_candidates
+            ]
+            total_trigger_candidates += int(trigger_candidates.sum())
+            valid_offsets = np.flatnonzero(trigger_candidates)
+        else:
+            valid_offsets = np.arange(n_candidates, dtype=np.int64)
+
+        if valid_offsets.size == 0:
+            continue
+
+        total_valid_offsets += int(valid_offsets.size)
         X_chunks.append(np.swapaxes(X_windows[valid_offsets], 1, 2))
         y_chunks.append(np.swapaxes(y_windows[valid_offsets], 1, 2))
 
     del feat_vals, tgt_vals, alert_vals, subset
     gc.collect()
 
+    if debug:
+        print(f"  segments_considered:   {total_segments_considered:,}")
+        print(f"  segments_too_short:    {total_segments_too_short:,}")
+        print(f"  total_candidates:      {total_candidates:,}")
+        if require_alert_trigger:
+            print(f"  trigger_candidates=1:  {total_trigger_candidates:,}")
+        print(f"  valid_offsets_kept:    {total_valid_offsets:,}")
+
     if not X_chunks:
-        return (
-            np.empty((0, input_length, len(feature_cols)), dtype=np.float32),
-            np.empty((0, forecast_horizon_in_sec, 1), dtype=np.float32),
-        )
+        if debug:
+            print("  no valid windows kept -> returning empty\n")
+        return empty_X, empty_y
 
     X_arr = np.concatenate(X_chunks, axis=0).astype(np.float32, copy=False)
     y_arr = np.concatenate(y_chunks, axis=0).astype(np.float32, copy=False)
+
     del X_chunks, y_chunks
     gc.collect()
+
+    if debug:
+        print(f"  final X shape:         {X_arr.shape}")
+        print(f"  final y shape:         {y_arr.shape}\n")
 
     return X_arr, y_arr
 
@@ -451,13 +402,7 @@ def fit_transform_catch22_windows(
     X_train: np.ndarray,
     *extra_sets: np.ndarray,
 ) -> tuple[np.ndarray, ...]:
-    """Fit catch22 on train windows and transform train plus any extra window sets.
-
-    The transformer expects collections shaped (samples, channels, timepoints),
-    while our pipeline stores windows as (samples, timesteps, features). The
-    axis swap happens here to avoid the orientation mistake present in the
-    original Charles-Henri sketch.
-    """
+    """Fit catch22 on train windows and transform train plus any extra window sets."""
     if X_train.shape[0] == 0:
         raise ValueError("Cannot fit catch22 features on an empty training window set")
 
@@ -526,12 +471,9 @@ def build_window_index_mm256(
     stop_index: int | None = None,
     window_length_in_sec: int = 300,
     forecast_horizon_in_sec: int = 120,
+    require_alert_trigger: bool = True,
 ) -> pd.DataFrame:
-    """Return one row of metadata per valid MM256 forecast window.
-
-    The returned rows match the sample order produced by ``slice_windows_mm256``
-    for the same dataframe and arguments.
-    """
+    """Return one row of metadata per valid MM256 forecast window."""
     if stop_index is None:
         stop_index = len(df)
 
@@ -555,23 +497,14 @@ def build_window_index_mm256(
 
     alert_vals = subset["ALERT"].to_numpy(dtype=bool, copy=False)
     timestamp_index = subset.index
-    timestamp_ns = timestamp_index.asi8
     total_window = input_length + forecast_horizon_in_sec
 
-    if not alert_vals.any():
-        return pd.DataFrame(
-            columns=[
-                "sample_id",
-                "input_start_time",
-                "input_end_time",
-                "target_start_time",
-                "target_end_time",
-            ]
-        )
-
-    segment_breaks = np.flatnonzero(np.diff(timestamp_ns) != 1_000_000_000) + 1
-    segment_starts = np.concatenate(([0], segment_breaks))
-    segment_stops = np.concatenate((segment_breaks, [len(subset)]))
+    deltas = timestamp_index.to_series().diff()
+    one_second = pd.Timedelta(seconds=1)
+    break_mask = deltas.ne(one_second).to_numpy().copy()
+    break_mask[0] = True
+    segment_starts = np.flatnonzero(break_mask)
+    segment_stops = np.concatenate((segment_starts[1:], [len(subset)]))
 
     rows = []
     sample_id = 0
@@ -581,10 +514,15 @@ def build_window_index_mm256(
             continue
 
         n_candidates = seg_len - total_window + 1
-        trigger_candidates = alert_vals[
-            seg_start + input_length - 1 : seg_start + input_length - 1 + n_candidates
-        ]
-        valid_offsets = np.flatnonzero(trigger_candidates)
+
+        if require_alert_trigger:
+            trigger_candidates = alert_vals[
+                seg_start + input_length - 1 : seg_start + input_length - 1 + n_candidates
+            ]
+            valid_offsets = np.flatnonzero(trigger_candidates)
+        else:
+            valid_offsets = np.arange(n_candidates, dtype=np.int64)
+
         if valid_offsets.size == 0:
             continue
 
@@ -616,24 +554,11 @@ def build_window_index_mm256(
     return pd.DataFrame(rows)
 
 
-# ---------------------------------------------------------------------------
-# 5. Per-fold scaler: refit on training portion only (no data leakage)
-# ---------------------------------------------------------------------------
 def scale_fold(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
 ) -> tuple:
-    """Fit MinMaxScaler on *train_df*, transform both train & val.
-
-    Parameters
-    ----------
-    train_df, val_df : pd.DataFrame
-        Unscaled DataFrames sharing the same columns.
-
-    Returns
-    -------
-    (scaled_train, scaled_val, scalers)
-    """
+    """Fit MinMaxScaler on train_df, transform both train and val."""
     train_out = train_df.copy()
     val_out = val_df.copy()
     scalers = {}
@@ -648,9 +573,6 @@ def scale_fold(
     return train_out, val_out, scalers
 
 
-# ---------------------------------------------------------------------------
-# 6. Push active-day summary to BigQuery (optional)
-# ---------------------------------------------------------------------------
 def push_active_days_to_bq(active_days: pd.DataFrame, metadata: dict):
     """Push the active-day summary table to BigQuery."""
     from google.cloud import bigquery
@@ -672,9 +594,6 @@ def push_active_days_to_bq(active_days: pd.DataFrame, metadata: dict):
     return table_id
 
 
-# ---------------------------------------------------------------------------
-# CLI entry point — inspect preprocessing, generate diagnostic plots
-# ---------------------------------------------------------------------------
 def main():
     import matplotlib
 
@@ -686,19 +605,20 @@ def main():
     )
     parser.add_argument("--source", choices=["bq", "cache", "local"], default="cache")
     parser.add_argument("--cache-raw", action="store_true")
-    parser.add_argument("--alert-rate", type=float, default=1.0,
-                        help="Methane %% threshold for ALERT flag")
-    parser.add_argument("--concentration-threshold", type=float, default=1.0,
-                        help="Min daily peak MM256 %% to include a day")
-    parser.add_argument("--skip-cleaning", dest="clean_abnormal_values", action="store_false",
-                        help="Disable anomaly cleaning before MM256 preprocessing")
-    parser.add_argument("--frozen-sensor-window", type=int, default=3600,
-                        help="Frozen-sensor detection window in seconds (default: 3600)")
-    parser.add_argument("--sensor-disagreement-z-threshold", type=float, default=6.0,
-                        help="Accepted z-score gap between co-located sensors (default: 6.0)")
+    parser.add_argument("--alert-rate", type=float, default=1.0, help="Methane %% threshold for ALERT flag")
+    parser.add_argument("--concentration-threshold", type=float, default=1.0, help="Min daily peak MM256 %% to include a day")
+    parser.add_argument("--skip-cleaning", dest="clean_abnormal_values", action="store_false", help="Disable anomaly cleaning before MM256 preprocessing")
+    parser.add_argument("--frozen-sensor-window", type=int, default=3600, help="Frozen-sensor detection window in seconds (default: 3600)")
+    parser.add_argument("--sensor-disagreement-z-threshold", type=float, default=6.0, help="Accepted z-score gap between co-located sensors (default: 6.0)")
     parser.set_defaults(clean_abnormal_values=True)
-    parser.add_argument("--push-bq", action="store_true",
-                        help="Push active-day summary to BigQuery")
+
+    parser.add_argument("--window-length", type=int, default=300, help="Total window length in seconds (input + forecast)")
+    parser.add_argument("--forecast-horizon", type=int, default=120, help="Forecast horizon in seconds")
+    parser.add_argument("--no-require-alert-trigger", dest="require_alert_trigger", action="store_false", help="Keep all contiguous windows, not only windows triggered by ALERT")
+    parser.add_argument("--debug-windows", action="store_true", help="Print detailed diagnostics from slice_windows_mm256")
+    parser.set_defaults(require_alert_trigger=True)
+
+    parser.add_argument("--push-bq", action="store_true", help="Push active-day summary to BigQuery")
     args = parser.parse_args()
 
     data, scalers, meta = preprocess_mm256(
@@ -712,7 +632,6 @@ def main():
         sensor_disagreement_z_threshold=args.sensor_disagreement_z_threshold,
     )
 
-    # ---- Diagnostic output ----
     print(f"\n--- Preprocessing summary ---")
     print(f"Shape: {data.shape}")
     print(f"Active days: {meta['n_active_days']}")
@@ -724,11 +643,9 @@ def main():
     print(f"\nActive days table:")
     print(active_days.to_string(index=False))
 
-    # ---- Quick diagnostic plots ----
     plots_dir = os.path.join(PROJECT_ROOT, "results", "graphs", "mm256_preprocessing")
     os.makedirs(plots_dir, exist_ok=True)
 
-    # (a) Daily peak concentration
     fig, ax = plt.subplots(figsize=(14, 4))
     ax.bar(range(len(active_days)), active_days["day_peak_mm256"], color="tomato", alpha=0.8)
     ax.set_xlabel("Active day index")
@@ -741,7 +658,6 @@ def main():
     plt.close(fig)
     print(f"  -> {plots_dir}/daily_peak_mm256.png")
 
-    # (b) Seconds above threshold per day
     fig, ax = plt.subplots(figsize=(14, 4))
     ax.bar(range(len(active_days)), active_days["n_seconds_above"], color="steelblue", alpha=0.8)
     ax.set_xlabel("Active day index")
@@ -752,7 +668,6 @@ def main():
     plt.close(fig)
     print(f"  -> {plots_dir}/seconds_above_per_day.png")
 
-    # (c) Full time series with active-day shading
     fig, ax = plt.subplots(figsize=(16, 4))
     ax.plot(data.index, data[TARGET_SENSOR], linewidth=0.3, color="navy", alpha=0.7)
     ax.set_xlabel("Time")
@@ -763,11 +678,19 @@ def main():
     plt.close(fig)
     print(f"  -> {plots_dir}/mm256_active_timeseries.png")
 
-    # ---- Quick window test ----
-    X, y = slice_windows_mm256(data)
-    print(f"\nWindow test (full data): X={X.shape}, y={y.shape}")
+    X, y = slice_windows_mm256(
+        data,
+        window_length_in_sec=args.window_length,
+        forecast_horizon_in_sec=args.forecast_horizon,
+        require_alert_trigger=args.require_alert_trigger,
+        debug=args.debug_windows,
+    )
+    print(
+        f"\nWindow test (full data): "
+        f"X={X.shape}, y={y.shape}, "
+        f"require_alert_trigger={args.require_alert_trigger}"
+    )
 
-    # ---- Optionally push to BQ ----
     if args.push_bq:
         push_active_days_to_bq(active_days, meta)
 
