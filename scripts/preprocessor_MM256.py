@@ -38,8 +38,14 @@ from ml_logic.secrets import get_secret
 
 TARGET_SENSOR = "MM256"
 
-SENSORS_TO_DROP = ["MM263", "MM264", "MM252", "MM261", "MM262", "MM211"]
-AMP_COLS = ["AMP1_IR", "AMP2_IR", "DMP3_IR", "DMP4_IR", "AMP5_IR"]
+# Iteration 1 feature selection — physically motivated for MM256 mid-longwall.
+# See research/analysis/qn_analysis/sensor_column_mapping.json for full mapping.
+#   MM256  = methane(t)           autoregressive target
+#   AN422  = airflow_headgate_ms  airflow power — dilution & transport
+#   AMP1_IR = shearer_left_head_A machine power — emission rate proxy
+#   AN423  = airflow_tailgate_ms  airflow direction
+#   F_SIDE = shearer_direction    machine direction (reserve, kept for iter 2)
+FEATURES_KEEP = ["MM256", "AN422", "AMP1_IR", "AN423", "F_SIDE"]
 
 SEQUENCE_INPUT_NAME = "sequence_input"
 CATCH22_INPUT_NAME = "catch22_input"
@@ -162,13 +168,11 @@ def preprocess_mm256(
     active_rows = len(df)
     print(f"Rows after day filter: {active_rows:,} ({active_rows / total_rows * 100:.1f}%)")
 
-    cols_to_drop = [c for c in SENSORS_TO_DROP if c in df.columns]
-    df.drop(columns=cols_to_drop, inplace=True)
-
-    amp_present = [c for c in AMP_COLS if c in df.columns]
-    if amp_present:
-        df["AMP_AVG"] = df[amp_present].mean(axis=1)
-        df.drop(columns=amp_present, inplace=True)
+    cols_to_keep = [c for c in FEATURES_KEEP if c in df.columns]
+    dropped = sorted(set(df.columns) - set(cols_to_keep))
+    df = df[cols_to_keep]
+    print(f"Kept {len(cols_to_keep)} feature columns: {cols_to_keep}")
+    print(f"Dropped {len(dropped)} columns: {dropped}")
 
     df["ALERT"] = (df[TARGET_SENSOR] >= alert_rate).astype(np.int8)
     n_alert = int(df["ALERT"].sum())
