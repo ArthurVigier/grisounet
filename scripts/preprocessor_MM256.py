@@ -44,12 +44,24 @@ AMP_COLS = ["AMP1_IR", "AMP2_IR", "DMP3_IR", "DMP4_IR", "AMP5_IR"]
 SEQUENCE_INPUT_NAME = "sequence_input"
 CATCH22_INPUT_NAME = "catch22_input"
 
+# Days with sensor saturation (MM256 peaks at 30%, physically unrealistic).
+# These are excluded before training to avoid teaching the model bogus patterns.
+EXCLUDED_DATES = [
+    "2014-03-04",
+    "2014-04-03",
+    "2014-04-28",
+    "2014-05-28",
+]
+
 
 def identify_active_days(
     df: pd.DataFrame,
     concentration_threshold: float = 1.0,
+    excluded_dates: list[str] | None = None,
 ) -> pd.DataFrame:
     """Return unique dates where MM256 peaked above the threshold."""
+    if excluded_dates is None:
+        excluded_dates = EXCLUDED_DATES
     daily = df.groupby(df.index.date).agg(
         day_peak_mm256=(TARGET_SENSOR, "max"),
         n_seconds_above=(TARGET_SENSOR, lambda s: (s >= concentration_threshold).sum()),
@@ -57,6 +69,15 @@ def identify_active_days(
     active = daily[daily["day_peak_mm256"] >= concentration_threshold].copy()
     active.index.name = "date"
     active = active.reset_index()
+
+    if excluded_dates:
+        exclude_set = set(pd.to_datetime(excluded_dates).date)
+        n_before = len(active)
+        active = active[~active["date"].isin(exclude_set)].reset_index(drop=True)
+        n_excluded = n_before - len(active)
+        if n_excluded > 0:
+            print(f"Excluded {n_excluded} saturated days: {sorted(exclude_set)}")
+
     return active
 
 
