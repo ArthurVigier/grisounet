@@ -23,7 +23,12 @@ from ml_logic.results_bq_save import (
     save_history_to_bq,
     save_predictions_to_bq,
 )
-from scripts.cv_time_series import build_last_input_baseline, compute_mm256_metrics, inference_batch_size
+from scripts.cv_time_series import (
+    build_last_input_baseline,
+    compute_mm256_metrics,
+    inference_batch_size,
+    pinball_metric_key,
+)
 from scripts.preprocessor_MM256 import (
     TARGET_SENSOR,
     build_mm256_model_inputs,
@@ -83,6 +88,7 @@ def train_final_mm256(
     window_length: int = 300,
     forecast_horizon: int = 120,
     model_variant: str = "advanced",
+    pinball_quantile: float = 0.8,
     push_bq: bool = False,
     save_preprocess: bool = False,
     upload_preprocess: bool = False,
@@ -96,7 +102,10 @@ def train_final_mm256(
 
     print(f"\n{'='*60}")
     print("  Final MM256 Training")
-    print(f"  model={model_variant}  epochs={recommended_epochs}  timestamp={timestamp}")
+    print(
+        f"  model={model_variant}  epochs={recommended_epochs}"
+        f"  pinball_q={pinball_quantile:.1f}  timestamp={timestamp}"
+    )
     print(f"{'='*60}\n")
 
     scaled_train, scaled_test, scalers = scale_fold(train_df, test_df)
@@ -168,6 +177,7 @@ def train_final_mm256(
         n_features=X_train.shape[2],
         forecast_horizon=y_train.shape[1],
         n_targets=y_train.shape[2],
+        quantile=pinball_quantile,
         n_static_features=0 if X_train_c22 is None else X_train_c22.shape[1],
     )
     train_inputs = build_mm256_model_inputs(X_train, X_train_c22)
@@ -186,13 +196,16 @@ def train_final_mm256(
     model_metrics = compute_mm256_metrics(
         y_test,
         y_pred,
+        quantile=pinball_quantile,
         include_secondary_diagnostics=include_secondary_diagnostics,
     )
     baseline_metrics = compute_mm256_metrics(
         y_test,
         y_baseline,
+        quantile=pinball_quantile,
         include_secondary_diagnostics=include_secondary_diagnostics,
     )
+    pinball_key = pinball_metric_key(pinball_quantile)
     improvement_metrics = {
         f"improvement_vs_baseline_{key}": round(
             baseline_metrics[key] - model_metrics[key],
@@ -202,9 +215,9 @@ def train_final_mm256(
     }
 
     print(
-        f"  Pinball q=0.9: model={model_metrics['pinball_90']:.5f}"
-        f" | baseline={baseline_metrics['pinball_90']:.5f}"
-        f" | gain={improvement_metrics['improvement_vs_baseline_pinball_90']:.5f}"
+        f"  Pinball q={pinball_quantile:.1f}: model={model_metrics[pinball_key]:.5f}"
+        f" | baseline={baseline_metrics[pinball_key]:.5f}"
+        f" | gain={improvement_metrics[f'improvement_vs_baseline_{pinball_key}']:.5f}"
     )
     if include_secondary_diagnostics:
         print(
@@ -222,6 +235,7 @@ def train_final_mm256(
     metadata = {
         "target_sensor": TARGET_SENSOR,
         "model_variant": model_variant,
+        "pinball_quantile": float(pinball_quantile),
         "recommended_epochs": int(recommended_epochs),
         "window_length": int(window_length),
         "forecast_horizon": int(forecast_horizon),
@@ -295,6 +309,7 @@ def train_final_mm256(
         "baseline_metrics": baseline_metrics,
         **improvement_metrics,
         "model_variant": model_variant,
+        "pinball_quantile": float(pinball_quantile),
         "recommended_epochs": int(recommended_epochs),
         "model_timestamp": model_timestamp,
         "use_catch22": bool(catch22_meta["enabled"]),

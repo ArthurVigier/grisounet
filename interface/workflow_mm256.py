@@ -66,6 +66,7 @@ def run_pipeline_mm256(
     batch_size: int = 128,
     patience: int = 5,
     model_variant: str = "advanced",
+    pinball_quantile: float = 0.8,
     skip_cv: bool = False,
     push_bq: bool = False,
     save_preprocess: bool = False,
@@ -130,6 +131,7 @@ def run_pipeline_mm256(
             batch_size=batch_size,
             patience=patience,
             model_variant=model_variant,
+            pinball_quantile=pinball_quantile,
             push_bq=push_bq,
             validation_monitor_max_windows=validation_monitor_max_windows,
             save_plots=save_cv_plots,
@@ -150,6 +152,7 @@ def run_pipeline_mm256(
         window_length=window_length,
         forecast_horizon=forecast_horizon,
         model_variant=model_variant,
+        pinball_quantile=pinball_quantile,
         push_bq=push_bq,
         save_preprocess=save_preprocess,
         upload_preprocess=upload_preprocess,
@@ -195,6 +198,7 @@ def run_cv_pipeline_mm256(
     batch_size: int = 128,
     patience: int = 5,
     model_variant: str = "advanced",
+    pinball_quantile: float = 0.8,
     push_bq: bool = False,
     validation_monitor_max_windows: int | None = 8192,
     save_cv_plots: bool = False,
@@ -223,6 +227,7 @@ def run_cv_pipeline_mm256(
         batch_size=batch_size,
         patience=patience,
         model_variant=model_variant,
+        pinball_quantile=pinball_quantile,
         push_bq=push_bq,
         validation_monitor_max_windows=validation_monitor_max_windows,
         save_plots=save_cv_plots,
@@ -250,6 +255,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--pinball-quantile", type=float, default=0.8)
     parser.add_argument("--validation-monitor-max-windows", type=int, default=8192)
     parser.add_argument("--model-variant", choices=["simple", "advanced"], default="advanced")
     parser.add_argument("--skip-cv", action="store_true")
@@ -284,6 +290,7 @@ def main():
             batch_size=args.batch_size,
             patience=args.patience,
             model_variant=args.model_variant,
+            pinball_quantile=args.pinball_quantile,
             push_bq=args.push_bq,
             validation_monitor_max_windows=args.validation_monitor_max_windows,
             save_cv_plots=args.save_cv_plots,
@@ -309,6 +316,7 @@ def main():
         batch_size=args.batch_size,
         patience=args.patience,
         model_variant=args.model_variant,
+        pinball_quantile=args.pinball_quantile,
         skip_cv=args.skip_cv,
         push_bq=args.push_bq,
         save_preprocess=args.save_preprocess,

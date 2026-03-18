@@ -29,15 +29,23 @@ from scripts.preprocessor_MM256 import (
 )
 
 
-PRIMARY_METRIC_KEYS = ("pinball_90",)
 SECONDARY_METRIC_KEYS = ("MAE", "RMSE")
 
 
-def get_metric_keys(include_secondary_diagnostics: bool = False) -> tuple[str, ...]:
+def pinball_metric_key(quantile: float) -> str:
+    """Build the metric key used for a pinball-loss quantile."""
+    return f"pinball_{int(round(float(quantile) * 100))}"
+
+
+def get_metric_keys(
+    quantile: float,
+    include_secondary_diagnostics: bool = False,
+) -> tuple[str, ...]:
     """Return the ordered metric keys for the MM256 reporting layer."""
+    primary_metric_keys = (pinball_metric_key(quantile),)
     if include_secondary_diagnostics:
-        return PRIMARY_METRIC_KEYS + SECONDARY_METRIC_KEYS
-    return PRIMARY_METRIC_KEYS
+        return primary_metric_keys + SECONDARY_METRIC_KEYS
+    return primary_metric_keys
 
 
 def _get_pyplot():
@@ -52,6 +60,7 @@ def _get_pyplot():
 def compute_mm256_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
+    quantile: float = 0.8,
     include_secondary_diagnostics: bool = True,
 ) -> dict:
     """Compute regression metrics for MM256 forecasts."""
@@ -62,11 +71,12 @@ def compute_mm256_metrics(
     mae = float(np.mean(np.abs(residual)))
     rmse = float(np.sqrt(np.mean(residual ** 2)))
     error = actual - predicted
-    q = 0.9
+    q = float(quantile)
     pinball = float(np.mean(np.maximum(q * error, (q - 1) * error)))
+    pinball_key = pinball_metric_key(q)
 
     metrics = {
-        "pinball_90": round(pinball, 6),
+        pinball_key: round(pinball, 6),
     }
     if include_secondary_diagnostics:
         metrics["MAE"] = round(mae, 6)
@@ -78,6 +88,7 @@ def compute_mm256_horizon_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     label: str,
+    quantile: float = 0.8,
     include_secondary_diagnostics: bool = True,
 ) -> pd.DataFrame:
     """Compute per-step forecast metrics for one prediction source."""
@@ -89,6 +100,7 @@ def compute_mm256_horizon_metrics(
         step_metrics = compute_mm256_metrics(
             step_true,
             step_pred,
+            quantile=quantile,
             include_secondary_diagnostics=include_secondary_diagnostics,
         )
         bias = float(np.mean(step_pred.ravel() - step_true.ravel()))
@@ -171,15 +183,16 @@ def _aggregate_cv_metrics(
     return agg
 
 
-def _aggregate_horizon_metrics(horizon_frames: list[pd.DataFrame]) -> pd.DataFrame:
+def _aggregate_horizon_metrics(horizon_frames: list[pd.DataFrame], quantile: float) -> pd.DataFrame:
     """Aggregate per-step metrics across folds."""
     if not horizon_frames:
         return pd.DataFrame()
 
     all_horizon = pd.concat(horizon_frames, ignore_index=True)
+    pinball_key = pinball_metric_key(quantile)
     agg_spec = {
-        "pinball_mean": ("pinball_90", "mean"),
-        "pinball_std": ("pinball_90", "std"),
+        "pinball_mean": (pinball_key, "mean"),
+        "pinball_std": (pinball_key, "std"),
         "bias_mean": ("bias", "mean"),
         "bias_std": ("bias", "std"),
         "n_folds": ("forecast_step", "size"),
@@ -199,13 +212,13 @@ def _aggregate_horizon_metrics(horizon_frames: list[pd.DataFrame]) -> pd.DataFra
     return summary
 
 
-def _plot_horizon_summary(horizon_summary: pd.DataFrame, output_path: str):
+def _plot_horizon_summary(horizon_summary: pd.DataFrame, output_path: str, quantile: float):
     """Plot per-step error profiles for model vs baseline."""
     if horizon_summary.empty:
         return
     plt = _get_pyplot()
 
-    plot_specs = [("Pinball q=0.9", "pinball_mean", "pinball_std")]
+    plot_specs = [(f"Pinball q={quantile:.1f}", "pinball_mean", "pinball_std")]
     if {"MAE_mean", "MAE_std"}.issubset(horizon_summary.columns):
         plot_specs.append(("MAE", "MAE_mean", "MAE_std"))
     if {"RMSE_mean", "RMSE_std"}.issubset(horizon_summary.columns):
@@ -249,6 +262,7 @@ def run_cv_mm256(
     batch_size: int = 128,
     patience: int = 5,
     model_variant: str = "advanced",
+    pinball_quantile: float = 0.8,
     push_bq: bool = False,
     validation_monitor_max_windows: int | None = 8192,
     save_plots: bool = False,
@@ -271,7 +285,11 @@ def run_cv_mm256(
 
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
     indices = np.arange(len(train_df))
-    metric_keys = get_metric_keys(include_secondary_diagnostics=include_secondary_diagnostics)
+    metric_keys = get_metric_keys(
+        pinball_quantile,
+        include_secondary_diagnostics=include_secondary_diagnostics,
+    )
+    pinball_key = pinball_metric_key(pinball_quantile)
     fold_metrics = []
     fold_histories = []
     fold_horizon_metrics = []
@@ -350,6 +368,7 @@ def run_cv_mm256(
             n_features=X_train.shape[2],
             forecast_horizon=y_train.shape[1],
             n_targets=y_train.shape[2],
+            quantile=pinball_quantile,
             n_static_features=0 if X_train_c22 is None else X_train_c22.shape[1],
         )
         train_inputs = build_mm256_model_inputs(X_train, X_train_c22)
@@ -380,12 +399,14 @@ def run_cv_mm256(
                     y_val,
                     y_pred,
                     label="model",
+                    quantile=pinball_quantile,
                     include_secondary_diagnostics=include_secondary_diagnostics,
                 ),
                 compute_mm256_horizon_metrics(
                     y_val,
                     y_baseline,
                     label="baseline",
+                    quantile=pinball_quantile,
                     include_secondary_diagnostics=include_secondary_diagnostics,
                 ),
             ],
@@ -398,11 +419,13 @@ def run_cv_mm256(
             compute_mm256_metrics(
                 y_val,
                 y_pred,
+                quantile=pinball_quantile,
                 include_secondary_diagnostics=include_secondary_diagnostics,
             ),
             compute_mm256_metrics(
                 y_val,
                 y_baseline,
+                quantile=pinball_quantile,
                 include_secondary_diagnostics=include_secondary_diagnostics,
             ),
             metric_keys=metric_keys,
@@ -422,9 +445,9 @@ def run_cv_mm256(
         fold_metrics.append(metrics)
 
         print(
-            f"  Pinball q=0.9: model={metrics['pinball_90']:.5f}"
-            f" | baseline={metrics['baseline_pinball_90']:.5f}"
-            f" | gain={metrics['improvement_vs_baseline_pinball_90']:.5f}"
+            f"  Pinball q={pinball_quantile:.1f}: model={metrics[pinball_key]:.5f}"
+            f" | baseline={metrics[f'baseline_{pinball_key}']:.5f}"
+            f" | gain={metrics[f'improvement_vs_baseline_{pinball_key}']:.5f}"
         )
         if include_secondary_diagnostics:
             print(
@@ -476,6 +499,7 @@ def run_cv_mm256(
     agg = _aggregate_cv_metrics(ok_folds, n_splits, metric_keys=metric_keys)
     agg["use_catch22"] = bool(use_catch22)
     agg["include_secondary_diagnostics"] = bool(include_secondary_diagnostics)
+    agg["pinball_quantile"] = float(pinball_quantile)
     agg["n_catch22_features"] = int(
         max((metric.get("n_catch22_features", 0) for metric in ok_folds), default=0)
     )
@@ -489,9 +513,9 @@ def run_cv_mm256(
             f" (median best epoch across folds)"
         )
         print(
-            f"  Pinball q=0.9: model={agg['pinball_90_mean']:.5f}"
-            f" | baseline={agg['baseline_pinball_90_mean']:.5f}"
-            f" | gain={agg['improvement_vs_baseline_pinball_90_mean']:.5f}"
+            f"  Pinball q={pinball_quantile:.1f}: model={agg[f'{pinball_key}_mean']:.5f}"
+            f" | baseline={agg[f'baseline_{pinball_key}_mean']:.5f}"
+            f" | gain={agg[f'improvement_vs_baseline_{pinball_key}_mean']:.5f}"
         )
         if include_secondary_diagnostics:
             print(
@@ -514,10 +538,10 @@ def run_cv_mm256(
 
     horizon_df = pd.concat(fold_horizon_metrics, ignore_index=True) if fold_horizon_metrics else pd.DataFrame()
     horizon_df.to_csv(horizon_metrics_path, index=False)
-    horizon_summary = _aggregate_horizon_metrics(fold_horizon_metrics)
+    horizon_summary = _aggregate_horizon_metrics(fold_horizon_metrics, quantile=pinball_quantile)
     horizon_summary.to_csv(horizon_summary_path, index=False)
     if save_plots:
-        _plot_horizon_summary(horizon_summary, horizon_plot_path)
+        _plot_horizon_summary(horizon_summary, horizon_plot_path, quantile=pinball_quantile)
 
     agg_path = os.path.join(results_dir, f"cv_mm256_aggregate_{timestamp}.json")
     with open(agg_path, "w", encoding="utf-8") as stream:
@@ -533,10 +557,10 @@ def run_cv_mm256(
 
     if save_plots and len(ok_folds) > 1:
         plt = _get_pyplot()
-        metric_specs = [("pinball_90", "seagreen")]
+        metric_specs = [(pinball_key, "seagreen")]
         if include_secondary_diagnostics:
             metric_specs = [
-                ("pinball_90", "seagreen"),
+                (pinball_key, "seagreen"),
                 ("MAE", "steelblue"),
                 ("RMSE", "tomato"),
             ]
@@ -573,6 +597,7 @@ def run_cv_mm256(
         "recommended_epochs": agg.get("recommended_epochs", epochs),
         "n_splits": n_splits,
         "model_variant": model_variant,
+        "pinball_quantile": float(pinball_quantile),
         "use_catch22": bool(use_catch22),
         "include_secondary_diagnostics": bool(include_secondary_diagnostics),
         "metrics_path": metrics_path,
@@ -619,6 +644,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--pinball-quantile", type=float, default=0.8)
     parser.add_argument("--validation-monitor-max-windows", type=int, default=8192)
     parser.add_argument("--model-variant", choices=["simple", "advanced"], default="advanced")
     parser.add_argument("--push-bq", action="store_true")
@@ -649,6 +675,7 @@ def main():
         batch_size=args.batch_size,
         patience=args.patience,
         model_variant=args.model_variant,
+        pinball_quantile=args.pinball_quantile,
         push_bq=args.push_bq,
         validation_monitor_max_windows=args.validation_monitor_max_windows,
         save_plots=args.save_plots,

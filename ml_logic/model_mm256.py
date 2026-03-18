@@ -10,7 +10,7 @@ class PinballLoss(tf.keras.losses.Loss):
 
     def __init__(
         self,
-        quantile: float = 0.9,
+        quantile: float = 0.8,
         name: str = "pinball_loss",
         reduction: str = "sum_over_batch_size",
     ):
@@ -29,7 +29,7 @@ class PinballLoss(tf.keras.losses.Loss):
         return config
 
 
-def pinball_loss(y_true, y_pred, quantile=0.9):
+def pinball_loss(y_true, y_pred, quantile=0.8):
     """Backward-compatible functional wrapper around the serializable loss."""
     return PinballLoss(quantile=quantile)(y_true, y_pred)
 
@@ -40,7 +40,7 @@ def build_simple_lstm_mm256(
     forecast_horizon: int,
     n_targets: int = 1,
     units: int = 64,
-    quantile: float = 0.9,
+    quantile: float = 0.8,
     n_static_features: int = 0,
 ):
     """Build the simple encoder-decoder LSTM used as the model baseline."""
@@ -76,7 +76,7 @@ def build_advanced_lstm_mm256(
     forecast_horizon: int,
     n_targets: int = 1,
     units: int = 64,
-    quantile: float = 0.9,
+    quantile: float = 0.8,
     n_static_features: int = 0,
 ):
     """Build the deeper encoder-decoder LSTM used for the MM256 candidate model."""
@@ -114,7 +114,7 @@ def build_mm256_model(
     forecast_horizon: int,
     n_targets: int = 1,
     units: int = 64,
-    quantile: float = 0.9,
+    quantile: float = 0.8,
     n_static_features: int = 0,
 ):
     """Build one of the supported MM256 architectures."""
@@ -143,7 +143,7 @@ def _fit_mm256_model(
     X_val=None,
     y_val: np.ndarray | None = None,
     epochs: int = 40,
-    batch_size: int = 32,
+    batch_size: int = 128,
     patience: int = 5,
 ):
     early_stop = tf.keras.callbacks.EarlyStopping(
@@ -178,9 +178,9 @@ def simple_lstm_mm256(
     y_val: np.ndarray | None = None,
     units: int = 64,
     epochs: int = 40,
-    batch_size: int = 32,
+    batch_size: int = 128,
     patience: int = 5,
-    quantile: float = 0.9,
+    quantile: float = 0.8,
     n_static_features: int = 0,
 ) -> tuple:
     """Train the simple MM256 LSTM model."""
@@ -213,9 +213,9 @@ def advanced_lstm_mm256(
     y_val: np.ndarray | None = None,
     units: int = 64,
     epochs: int = 40,
-    batch_size: int = 32,
+    batch_size: int = 128,
     patience: int = 5,
-    quantile: float = 0.9,
+    quantile: float = 0.8,
     n_static_features: int = 0,
 ) -> tuple:
     """Train the advanced MM256 LSTM model."""
