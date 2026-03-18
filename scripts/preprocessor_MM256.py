@@ -167,6 +167,10 @@ def preprocess_mm256(
     df["time"] = pd.to_datetime(df[["year", "month", "day", "hour", "minute", "second"]])
     df.set_index("time", inplace=True)
     df.drop(columns=["year", "month", "day", "hour", "minute", "second"], inplace=True)
+    if not df.index.is_monotonic_increasing:
+        # Temporal splits and contiguous-window extraction both assume sorted rows.
+        df.sort_index(inplace=True)
+        print("Sorted rows by timestamp to restore chronological order.")
     df["CR863"] = df["CR863"].astype(np.float32)
 
     total_rows = len(df)
