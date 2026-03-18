@@ -54,7 +54,7 @@ def run_pipeline_mm256(
     cache_raw: bool = False,
     alert_rate: float = 1.0,
     concentration_threshold: float = 1.0,
-    clean_abnormal_values: bool = True,
+    clean_abnormal_values: bool = False,
     frozen_sensor_window: int = 3600,
     sensor_disagreement_z_threshold: float = 6.0,
     train_ratio: float = 0.7,
@@ -186,7 +186,7 @@ def run_cv_pipeline_mm256(
     cache_raw: bool = False,
     alert_rate: float = 1.0,
     concentration_threshold: float = 1.0,
-    clean_abnormal_values: bool = True,
+    clean_abnormal_values: bool = False,
     frozen_sensor_window: int = 3600,
     sensor_disagreement_z_threshold: float = 6.0,
     train_ratio: float = 0.7,
@@ -243,10 +243,10 @@ def main():
     parser.add_argument("--cache-raw", action="store_true")
     parser.add_argument("--alert-rate", type=float, default=1.0)
     parser.add_argument("--concentration-threshold", type=float, default=1.0)
-    parser.add_argument("--skip-cleaning", dest="clean_abnormal_values", action="store_false")
+    parser.add_argument("--enable-cleaning", dest="clean_abnormal_values", action="store_true")
     parser.add_argument("--frozen-sensor-window", type=int, default=3600)
     parser.add_argument("--sensor-disagreement-z-threshold", type=float, default=6.0)
-    parser.set_defaults(clean_abnormal_values=True)
+    parser.set_defaults(clean_abnormal_values=False)
     parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--gap", type=int, default=300)

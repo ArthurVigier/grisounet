@@ -230,7 +230,7 @@ make pull_bq
 2. Run anomaly cleaning (frozen sensor detection: 3600 s, co-located sensor disagreement: 6 σ)
 3. Keep only days where MM256 is active
 4. Build MM256 windows (180 s input → 120 s forecast)
-5. Optionally compute catch22 features from each window
+5. Compute catch22 statistical features from each window (enabled by default)
 6. Run time-series CV (5-fold by default)
 7. Train a final model on the train split
 8. Evaluate on the holdout split

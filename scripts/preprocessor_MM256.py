@@ -76,7 +76,7 @@ def preprocess_mm256(
     alert_rate: float = 1.0,
     concentration_threshold: float = 1.0,
     scale: bool = True,
-    clean_abnormal_values: bool = True,
+    clean_abnormal_values: bool = False,
     frozen_sensor_window: int = 3600,
     sensor_disagreement_z_threshold: float = 6.0,
 ) -> tuple:
