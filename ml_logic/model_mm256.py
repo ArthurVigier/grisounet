@@ -1,41 +1,154 @@
-"""
-Single-sensor LSTM models for MM256 methane forecasting.
-
-Provides a simple LSTM encoder-decoder and an advanced variant.
-Both output shape (n_samples, horizon, 1) — single sensor only.
-
-The workflow trains the simple model first.  The advanced model can be
-enabled later once the simple baseline is validated.
-"""
+"""Single-sensor LSTM models for MM256 methane forecasting."""
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import (
-    Dense,
-    LSTM,
-    Input,
-    RepeatVector,
-    TimeDistributed,
-)
 
 
-# ---------------------------------------------------------------------------
-# Loss function — pinball loss for quantile regression
-# ---------------------------------------------------------------------------
+@tf.keras.utils.register_keras_serializable(package="grisounet")
+class PinballLoss(tf.keras.losses.Loss):
+    """Serializable pinball loss used by the MM256 models."""
+
+    def __init__(
+        self,
+        quantile: float = 0.9,
+        name: str = "pinball_loss",
+        reduction: str = "sum_over_batch_size",
+    ):
+        super().__init__(name=name, reduction=reduction)
+        self.quantile = float(quantile)
+
+    def call(self, y_true, y_pred):
+        error = y_true - y_pred
+        return tf.reduce_mean(
+            tf.maximum(self.quantile * error, (self.quantile - 1.0) * error)
+        )
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"quantile": self.quantile})
+        return config
+
+
 def pinball_loss(y_true, y_pred, quantile=0.9):
-    """Pinball (quantile) loss.
-
-    At quantile=0.9 the model is penalised more for under-predicting,
-    which is the safe choice for methane early-warning.
-    """
-    error = y_true - y_pred
-    return tf.reduce_mean(tf.maximum(quantile * error, (quantile - 1) * error))
+    """Backward-compatible functional wrapper around the serializable loss."""
+    return PinballLoss(quantile=quantile)(y_true, y_pred)
 
 
-# ---------------------------------------------------------------------------
-# Simple LSTM — single encoder layer + dense decoder
-# ---------------------------------------------------------------------------
+def build_simple_lstm_mm256(
+    input_length: int,
+    n_features: int,
+    forecast_horizon: int,
+    n_targets: int = 1,
+    units: int = 64,
+    quantile: float = 0.9,
+):
+    """Build the simple encoder-decoder LSTM used as the model baseline."""
+    from tensorflow.keras.layers import Dense, Input, LSTM, RepeatVector, TimeDistributed
+    from tensorflow.keras.models import Sequential
+
+    model = Sequential([
+        Input(shape=(input_length, n_features)),
+        LSTM(units, return_sequences=False),
+        RepeatVector(forecast_horizon),
+        LSTM(units, return_sequences=True),
+        TimeDistributed(Dense(n_targets)),
+    ])
+    model.compile(
+        optimizer="adam",
+        loss=PinballLoss(quantile=quantile),
+    )
+    return model
+
+
+def build_advanced_lstm_mm256(
+    input_length: int,
+    n_features: int,
+    forecast_horizon: int,
+    n_targets: int = 1,
+    units: int = 64,
+    quantile: float = 0.9,
+):
+    """Build the deeper encoder-decoder LSTM used for the MM256 candidate model."""
+    from tensorflow.keras.layers import Dense, Input, LSTM, RepeatVector, TimeDistributed
+    from tensorflow.keras.models import Sequential
+
+    model = Sequential([
+        Input(shape=(input_length, n_features)),
+        LSTM(units, return_sequences=True),
+        LSTM(units, return_sequences=False),
+        RepeatVector(forecast_horizon),
+        LSTM(units, return_sequences=True),
+        TimeDistributed(Dense(n_targets)),
+    ])
+    model.compile(
+        optimizer="adam",
+        loss=PinballLoss(quantile=quantile),
+    )
+    return model
+
+
+def build_mm256_model(
+    variant: str,
+    input_length: int,
+    n_features: int,
+    forecast_horizon: int,
+    n_targets: int = 1,
+    units: int = 64,
+    quantile: float = 0.9,
+):
+    """Build one of the supported MM256 architectures."""
+    builders = {
+        "simple": build_simple_lstm_mm256,
+        "advanced": build_advanced_lstm_mm256,
+    }
+    if variant not in builders:
+        raise ValueError(f"Unknown MM256 model variant: {variant}")
+
+    return builders[variant](
+        input_length=input_length,
+        n_features=n_features,
+        forecast_horizon=forecast_horizon,
+        n_targets=n_targets,
+        units=units,
+        quantile=quantile,
+    )
+
+
+def _fit_mm256_model(
+    model,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray | None = None,
+    y_val: np.ndarray | None = None,
+    epochs: int = 40,
+    batch_size: int = 32,
+    patience: int = 5,
+):
+    early_stop = tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss",
+        patience=patience,
+        restore_best_weights=True,
+    )
+
+    fit_kwargs = {
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "callbacks": [early_stop],
+    }
+    if X_val is not None and X_val.shape[0] > 0:
+        fit_kwargs["validation_data"] = (X_val, y_val)
+    else:
+        fit_kwargs["validation_split"] = 0.2
+
+    history = model.fit(X_train, y_train, **fit_kwargs)
+
+    y_pred = None
+    if X_val is not None and X_val.shape[0] > 0:
+        y_pred = model.predict(X_val, batch_size=batch_size)
+
+    return history, y_pred
+
+
 def simple_lstm_mm256(
     X_train: np.ndarray,
     y_train: np.ndarray,
@@ -47,79 +160,28 @@ def simple_lstm_mm256(
     patience: int = 5,
     quantile: float = 0.9,
 ) -> tuple:
-    """Train a simple encoder-decoder LSTM for single-sensor forecasting.
-
-    Architecture
-    ------------
-    Input  -> LSTM(units) -> RepeatVector(horizon) -> LSTM(units, seq) -> Dense(1)
-
-    This is the **baseline model** — one encoder layer, one decoder layer.
-    Start here; upgrade to ``advanced_lstm_mm256`` only if needed.
-
-    Parameters
-    ----------
-    X_train : (n_samples, input_length, n_features)
-    y_train : (n_samples, horizon, 1)
-    X_val, y_val : optional validation arrays.  If None, uses
-        ``validation_split=0.2`` from training data.
-    units : LSTM hidden size.
-    epochs, batch_size, patience : training hyperparameters.
-    quantile : quantile for pinball loss.
-
-    Returns
-    -------
-    (model, history, y_pred)
-        y_pred is None when X_val is None or empty.
-    """
-    input_length = X_train.shape[1]
-    n_features = X_train.shape[2]
-    horizon = y_train.shape[1]
-
-    model = Sequential([
-        Input(shape=(input_length, n_features)),
-        LSTM(units, return_sequences=False),
-        RepeatVector(horizon),
-        LSTM(units, return_sequences=True),
-        TimeDistributed(Dense(1)),
-    ])
-
-    model.compile(
-        optimizer="adam",
-        loss=lambda yt, yp: pinball_loss(yt, yp, quantile=quantile),
+    """Train the simple MM256 LSTM model."""
+    model = build_simple_lstm_mm256(
+        input_length=X_train.shape[1],
+        n_features=X_train.shape[2],
+        forecast_horizon=y_train.shape[1],
+        n_targets=y_train.shape[2] if y_train.ndim == 3 else 1,
+        units=units,
+        quantile=quantile,
     )
-
-    early_stop = tf.keras.callbacks.EarlyStopping(
-        monitor="val_loss",
-        patience=patience,
-        restore_best_weights=True,
-    )
-
-    fit_kwargs = dict(
+    history, y_pred = _fit_mm256_model(
+        model,
+        X_train,
+        y_train,
+        X_val=X_val,
+        y_val=y_val,
         epochs=epochs,
         batch_size=batch_size,
-        callbacks=[early_stop],
+        patience=patience,
     )
-
-    if X_val is not None and X_val.shape[0] > 0:
-        fit_kwargs["validation_data"] = (X_val, y_val)
-    else:
-        fit_kwargs["validation_split"] = 0.2
-
-    history = model.fit(X_train, y_train, **fit_kwargs)
-
-    # Predict on validation set
-    y_pred = None
-    if X_val is not None and X_val.shape[0] > 0:
-        y_pred = model.predict(X_val, batch_size=batch_size)
-        score = model.evaluate(X_val, y_val, verbose=0)
-        print(f"Simple LSTM — val loss: {score:.6f}")
-
     return model, history, y_pred
 
 
-# ---------------------------------------------------------------------------
-# Advanced LSTM — two encoder layers (deeper context encoding)
-# ---------------------------------------------------------------------------
 def advanced_lstm_mm256(
     X_train: np.ndarray,
     y_train: np.ndarray,
@@ -131,60 +193,23 @@ def advanced_lstm_mm256(
     patience: int = 5,
     quantile: float = 0.9,
 ) -> tuple:
-    """Train a deeper encoder-decoder LSTM for single-sensor forecasting.
-
-    Architecture
-    ------------
-    Input -> LSTM(units, seq) -> LSTM(units) -> RepeatVector -> LSTM(units, seq) -> Dense(1)
-
-    Two stacked encoder LSTMs capture longer-range temporal dependencies.
-    Use this once the simple baseline is validated.
-
-    Parameters & Returns: same as ``simple_lstm_mm256``.
-    """
-    input_length = X_train.shape[1]
-    n_features = X_train.shape[2]
-    horizon = y_train.shape[1]
-
-    model = Sequential([
-        Input(shape=(input_length, n_features)),
-        # Encoder — two stacked LSTMs
-        LSTM(units, return_sequences=True),
-        LSTM(units, return_sequences=False),
-        # Decoder
-        RepeatVector(horizon),
-        LSTM(units, return_sequences=True),
-        TimeDistributed(Dense(1)),
-    ])
-
-    model.compile(
-        optimizer="adam",
-        loss=lambda yt, yp: pinball_loss(yt, yp, quantile=quantile),
+    """Train the advanced MM256 LSTM model."""
+    model = build_advanced_lstm_mm256(
+        input_length=X_train.shape[1],
+        n_features=X_train.shape[2],
+        forecast_horizon=y_train.shape[1],
+        n_targets=y_train.shape[2] if y_train.ndim == 3 else 1,
+        units=units,
+        quantile=quantile,
     )
-
-    early_stop = tf.keras.callbacks.EarlyStopping(
-        monitor="val_loss",
-        patience=patience,
-        restore_best_weights=True,
-    )
-
-    fit_kwargs = dict(
+    history, y_pred = _fit_mm256_model(
+        model,
+        X_train,
+        y_train,
+        X_val=X_val,
+        y_val=y_val,
         epochs=epochs,
         batch_size=batch_size,
-        callbacks=[early_stop],
+        patience=patience,
     )
-
-    if X_val is not None and X_val.shape[0] > 0:
-        fit_kwargs["validation_data"] = (X_val, y_val)
-    else:
-        fit_kwargs["validation_split"] = 0.2
-
-    history = model.fit(X_train, y_train, **fit_kwargs)
-
-    y_pred = None
-    if X_val is not None and X_val.shape[0] > 0:
-        y_pred = model.predict(X_val, batch_size=batch_size)
-        score = model.evaluate(X_val, y_val, verbose=0)
-        print(f"Advanced LSTM — val loss: {score:.6f}")
-
     return model, history, y_pred

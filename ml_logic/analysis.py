@@ -1,12 +1,18 @@
 """Generate analysis graphs from predictions and training history"""
 import os
-from datetime import datetime
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 SENSORS_DEFAULT = ["MM256", "MM263", "MM264"]
+
+
+def _get_pyplot():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return plt
 
 
 def plot_loss_curves(history, timestamp, label_prefix=""):
@@ -18,6 +24,7 @@ def plot_loss_curves(history, timestamp, label_prefix=""):
         Optional prefix for the saved filename (e.g. ``"mm256_"``).
     """
     os.makedirs("results/graphs", exist_ok=True)
+    plt = _get_pyplot()
 
     plt.figure(figsize=(12, 5))
     plt.plot(history.history["loss"], label="Train Loss")
@@ -47,6 +54,7 @@ def plot_predictions_vs_actual(pred_df, timestamp, sensors=None, label_prefix=""
         sensors = SENSORS_DEFAULT
 
     os.makedirs("results/graphs", exist_ok=True)
+    plt = _get_pyplot()
 
     for sensor in sensors:
         sensor_df = pred_df[pred_df["sensor"] == sensor]

@@ -5,14 +5,14 @@ Loads the full dataset, filters to days where MM256 reaches >= 1% methane
 concentration, engineers features for a single-sensor target, and prepares
 data ready for TimeSeriesSplit cross-validation.
 
-This module is designed to be imported by cv_time_series.py (which handles
-the actual fold loop and model training), or run standalone for inspection.
+This module is designed to be imported by the MM256 workflow, the CV harness,
+and the final-training module, or run standalone for inspection.
 
 Usage:
     # As a module
     from scripts.preprocessor_MM256 import preprocess_mm256, slice_windows_mm256
-    data, scalers, meta = preprocess_mm256(source="cache", alert_rate=1.0)
-    X, y = slice_windows_mm256(data, start=0, stop=len(data))
+    data, scalers, meta = preprocess_mm256(source="cache", alert_rate=1.0, scale=False)
+    X, y = slice_windows_mm256(data, start_index=0, stop_index=len(data))
 
     # Standalone (inspect + save artifacts)
     python scripts/preprocessor_MM256.py [--source cache] [--alert-rate 1.0] [--push-bq]
@@ -23,9 +23,6 @@ import gc
 import os
 import sys
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
@@ -47,30 +44,8 @@ from ml_logic.secrets import get_secret
 # ---------------------------------------------------------------------------
 TARGET_SENSOR = "MM256"
 
-# Feature columns relevant to the MM256 sensor location.
-# We keep co-located environmental sensors + infrastructure readings.
-# Individual motor currents are replaced by AMP_AVG (see below).
-FEATURE_COLS_TO_KEEP = [
-    # Methanometer (target)
-    "MM256",
-    # Airflow
-    "AN422", "AN423",
-    # Temperature (paired probes)
-    "TP1711", "TP1721",
-    # Humidity
-    "RH1712", "RH1722",
-    # Barometric pressure
-    "BA1713", "BA1723",
-    # Pipeline / drainage
-    "CM861", "CR863", "P_864", "TC862", "WM868",
-    # Motor current (will be aggregated)
-    "AMP1_IR", "AMP2_IR", "DMP3_IR", "DMP4_IR", "AMP5_IR",
-    # Discrete
-    "F_SIDE", "V",
-]
-
 # Sensors that are NOT relevant when focusing on MM256 alone.
-# We exclude the other two critical methanometers from features to avoid
+# We exclude the other methanometers from features to avoid
 # information leakage (they are highly correlated and would mask the signal
 # we want MM256 to learn from environmental predictors).
 SENSORS_TO_DROP = ["MM263", "MM264", "MM252", "MM261", "MM262", "MM211"]
@@ -131,11 +106,9 @@ def filter_to_active_days(
     pd.DataFrame
         Filtered copy of *df*.
     """
-    active_set = set(active_days["date"])
-    mask = df.index.date  # array of datetime.date objects
-    keep = pd.Series([d in active_set for d in mask], index=df.index)
-    filtered = df.loc[keep].copy()
-    return filtered
+    active_dates = pd.to_datetime(active_days["date"])
+    keep = df.index.normalize().isin(active_dates)
+    return df.loc[keep].copy()
 
 
 # ---------------------------------------------------------------------------
@@ -146,11 +119,9 @@ def preprocess_mm256(
     cache_raw: bool = False,
     alert_rate: float = 1.0,
     concentration_threshold: float = 1.0,
+    scale: bool = True,
 ) -> tuple:
-    """Load data, filter to active days, engineer features, and scale.
-
-    This function does NOT split into train/test — that is handled by the
-    TimeSeriesSplit cross-validation harness in ``cv_time_series.py``.
+    """Load data, filter to active days, engineer features, and optionally scale.
 
     Parameters
     ----------
@@ -165,15 +136,19 @@ def preprocess_mm256(
     concentration_threshold : float
         Minimum daily peak MM256 value to include a day.  Days where MM256
         never reaches this value are entirely excluded.
+    scale : bool
+        If True, fit MinMaxScaler on the full filtered dataset.
+        If False, return the unscaled dataframe so a downstream caller can
+        fit scalers on train folds / train split only.
 
     Returns
     -------
     (processed_df, scalers, metadata)
         processed_df : pd.DataFrame
-            Scaled DataFrame with DatetimeIndex, ready for slicing into
-            (X, y) windows.  Contains only active-day rows.
+            DataFrame with DatetimeIndex, ready for slicing into (X, y)
+            windows. Scaled if ``scale=True``, otherwise left unscaled.
         scalers : dict
-            {column_name: fitted MinMaxScaler} — needed for inverse transform.
+            {column_name: fitted MinMaxScaler}. Empty when ``scale=False``.
         metadata : dict
             Diagnostic information (active_days DataFrame, row counts, etc.).
     """
@@ -224,21 +199,19 @@ def preprocess_mm256(
     if len(float_cols) > 0:
         df[float_cols] = df[float_cols].astype(np.float32)
 
-    # ---- Scale with MinMaxScaler (fit on FULL filtered data) ----
-    # NOTE: When used with TimeSeriesSplit, we refit the scaler on each
-    # fold's training portion only.  The scaler returned here is fitted on
-    # the entire filtered dataset and is useful for quick inspection / plots.
-    # The CV harness in cv_time_series.py handles per-fold scaling properly.
+    # ---- Optional full-data scaling ----
     scalers = {}
-    features_to_scale = df.select_dtypes(include=["floating"]).columns
-    for col in features_to_scale:
-        scaler = MinMaxScaler()
-        df[col] = scaler.fit_transform(df[[col]]).astype(np.float32)
-        scalers[col] = scaler
+    if scale:
+        features_to_scale = df.select_dtypes(include=["floating"]).columns
+        for col in features_to_scale:
+            scaler = MinMaxScaler()
+            df[col] = scaler.fit_transform(df[[col]]).astype(np.float32)
+            scalers[col] = scaler
 
     feature_cols = [c for c in df.columns if c not in ["ALERT"]]
     print(f"Feature columns ({len(feature_cols)}): {feature_cols}")
     print(f"Target: {TARGET_SENSOR}")
+    print(f"Scaled: {scale}")
 
     metadata = {
         "target_sensor": TARGET_SENSOR,
@@ -303,49 +276,170 @@ def slice_windows_mm256(
     feature_cols = [c for c in subset.columns if c not in excluded]
     target_cols = [TARGET_SENSOR]
 
-    trigger_mask = subset["ALERT"] == 1
-    trigger_times = subset.index[trigger_mask]
-
-    if trigger_times.empty:
+    if subset.empty:
         return (
             np.empty((0, input_length, len(feature_cols)), dtype=np.float32),
             np.empty((0, forecast_horizon_in_sec, 1), dtype=np.float32),
         )
 
-    subset_index = subset.index
     feat_vals = subset[feature_cols].to_numpy(dtype=np.float32, copy=False)
     tgt_vals = subset[target_cols].to_numpy(dtype=np.float32, copy=False)
-    one_sec = pd.Timedelta(seconds=1)
+    alert_vals = subset["ALERT"].to_numpy(dtype=bool, copy=False)
+    timestamp_ns = subset.index.asi8
+    total_window = input_length + forecast_horizon_in_sec
 
-    X_list, y_list = [], []
-    for t0 in trigger_times:
-        x_times = pd.date_range(end=t0, periods=input_length, freq="s")
-        y_times = pd.date_range(start=t0 + one_sec, periods=forecast_horizon_in_sec, freq="s")
-
-        x_idx = subset_index.get_indexer(x_times)
-        y_idx = subset_index.get_indexer(y_times)
-
-        if (x_idx < 0).any() or (y_idx < 0).any():
-            continue
-
-        X_list.append(feat_vals[x_idx])
-        y_list.append(tgt_vals[y_idx])
-
-    del feat_vals, tgt_vals, trigger_mask, trigger_times, subset
-    gc.collect()
-
-    if not X_list:
+    if not alert_vals.any():
         return (
             np.empty((0, input_length, len(feature_cols)), dtype=np.float32),
             np.empty((0, forecast_horizon_in_sec, 1), dtype=np.float32),
         )
 
-    X_arr = np.stack(X_list).astype(np.float32)
-    y_arr = np.stack(y_list).astype(np.float32)
-    del X_list, y_list
+    segment_breaks = np.flatnonzero(np.diff(timestamp_ns) != 1_000_000_000) + 1
+    segment_starts = np.concatenate(([0], segment_breaks))
+    segment_stops = np.concatenate((segment_breaks, [len(subset)]))
+
+    X_chunks, y_chunks = [], []
+    for seg_start, seg_stop in zip(segment_starts, segment_stops):
+        seg_len = seg_stop - seg_start
+        if seg_len < total_window:
+            continue
+
+        n_candidates = seg_len - total_window + 1
+        trigger_candidates = alert_vals[
+            seg_start + input_length - 1 : seg_start + input_length - 1 + n_candidates
+        ]
+        if not trigger_candidates.any():
+            continue
+
+        feat_segment = feat_vals[seg_start:seg_stop]
+        tgt_segment = tgt_vals[seg_start:seg_stop]
+
+        X_windows = np.lib.stride_tricks.sliding_window_view(
+            feat_segment,
+            window_shape=input_length,
+            axis=0,
+        )[:n_candidates]
+        y_windows = np.lib.stride_tricks.sliding_window_view(
+            tgt_segment[input_length:],
+            window_shape=forecast_horizon_in_sec,
+            axis=0,
+        )
+
+        valid_offsets = np.flatnonzero(trigger_candidates)
+        X_chunks.append(np.swapaxes(X_windows[valid_offsets], 1, 2))
+        y_chunks.append(np.swapaxes(y_windows[valid_offsets], 1, 2))
+
+    del feat_vals, tgt_vals, alert_vals, subset
+    gc.collect()
+
+    if not X_chunks:
+        return (
+            np.empty((0, input_length, len(feature_cols)), dtype=np.float32),
+            np.empty((0, forecast_horizon_in_sec, 1), dtype=np.float32),
+        )
+
+    X_arr = np.concatenate(X_chunks, axis=0).astype(np.float32, copy=False)
+    y_arr = np.concatenate(y_chunks, axis=0).astype(np.float32, copy=False)
+    del X_chunks, y_chunks
     gc.collect()
 
     return X_arr, y_arr
+
+
+def build_window_index_mm256(
+    df: pd.DataFrame,
+    start_index: int = 0,
+    stop_index: int | None = None,
+    window_length_in_sec: int = 300,
+    forecast_horizon_in_sec: int = 120,
+) -> pd.DataFrame:
+    """Return one row of metadata per valid MM256 forecast window.
+
+    The returned rows match the sample order produced by ``slice_windows_mm256``
+    for the same dataframe and arguments.
+    """
+    if stop_index is None:
+        stop_index = len(df)
+
+    input_length = window_length_in_sec - forecast_horizon_in_sec
+    if input_length <= 0:
+        raise ValueError("window_length_in_sec must be > forecast_horizon_in_sec")
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("Expected DatetimeIndex")
+
+    subset = df.iloc[start_index:stop_index]
+    if subset.empty:
+        return pd.DataFrame(
+            columns=[
+                "sample_id",
+                "input_start_time",
+                "input_end_time",
+                "target_start_time",
+                "target_end_time",
+            ]
+        )
+
+    alert_vals = subset["ALERT"].to_numpy(dtype=bool, copy=False)
+    timestamp_index = subset.index
+    timestamp_ns = timestamp_index.asi8
+    total_window = input_length + forecast_horizon_in_sec
+
+    if not alert_vals.any():
+        return pd.DataFrame(
+            columns=[
+                "sample_id",
+                "input_start_time",
+                "input_end_time",
+                "target_start_time",
+                "target_end_time",
+            ]
+        )
+
+    segment_breaks = np.flatnonzero(np.diff(timestamp_ns) != 1_000_000_000) + 1
+    segment_starts = np.concatenate(([0], segment_breaks))
+    segment_stops = np.concatenate((segment_breaks, [len(subset)]))
+
+    rows = []
+    sample_id = 0
+    for seg_start, seg_stop in zip(segment_starts, segment_stops):
+        seg_len = seg_stop - seg_start
+        if seg_len < total_window:
+            continue
+
+        n_candidates = seg_len - total_window + 1
+        trigger_candidates = alert_vals[
+            seg_start + input_length - 1 : seg_start + input_length - 1 + n_candidates
+        ]
+        valid_offsets = np.flatnonzero(trigger_candidates)
+        if valid_offsets.size == 0:
+            continue
+
+        global_starts = seg_start + valid_offsets
+        input_starts = timestamp_index[global_starts]
+        input_ends = timestamp_index[global_starts + input_length - 1]
+        target_starts = timestamp_index[global_starts + input_length]
+        target_ends = timestamp_index[
+            global_starts + input_length + forecast_horizon_in_sec - 1
+        ]
+
+        for input_start, input_end, target_start, target_end in zip(
+            input_starts,
+            input_ends,
+            target_starts,
+            target_ends,
+        ):
+            rows.append(
+                {
+                    "sample_id": sample_id,
+                    "input_start_time": input_start,
+                    "input_end_time": input_end,
+                    "target_start_time": target_start,
+                    "target_end_time": target_end,
+                }
+            )
+            sample_id += 1
+
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +502,11 @@ def push_active_days_to_bq(active_days: pd.DataFrame, metadata: dict):
 # CLI entry point — inspect preprocessing, generate diagnostic plots
 # ---------------------------------------------------------------------------
 def main():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     parser = argparse.ArgumentParser(
         description="Preprocess methane data for MM256 single-sensor pipeline"
     )
@@ -426,6 +525,7 @@ def main():
         cache_raw=args.cache_raw,
         alert_rate=args.alert_rate,
         concentration_threshold=args.concentration_threshold,
+        scale=True,
     )
 
     # ---- Diagnostic output ----

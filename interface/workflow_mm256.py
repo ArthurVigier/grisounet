@@ -1,288 +1,285 @@
 """
-Pipeline orchestrator for MM256 single-sensor methane forecasting.
+MM256 single-sensor workflow orchestrator.
 
-Two execution modes:
-  1. **Single run** (``run_pipeline_mm256``): simple train/test split, trains
-     the simple LSTM, saves model + predictions.  Good for a quick sanity check.
-  2. **Cross-validated run** (``run_cv_pipeline_mm256``): delegates to
-     ``cv_time_series.run_cv`` for proper k-fold TimeSeriesSplit evaluation.
+Default flow:
+  1. Load and preprocess the full dataset without scaling.
+  2. Split once into chronological train / holdout test blocks.
+  3. Run TimeSeriesSplit cross-validation on the train block only.
+  4. Retrain once on the full train block and evaluate once on the untouched test block.
 
-Both modes use the MM256-specific preprocessor, the single-sensor model,
-and the parameterised results_bq_save / analysis modules.
-
-Usage:
-    # Single run
-    python interface/workflow_mm256.py --mode single --source cache
-
-    # Cross-validated run
-    python interface/workflow_mm256.py --mode cv --n-splits 5 --source cache --push-bq
+The holdout test remains untouched during cross-validation, so the final metrics
+are a proper benchmark instead of a model-selection estimate.
 """
 
 import argparse
 import os
 import sys
-from datetime import datetime
 from time import perf_counter
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import pandas as pd
-
-# ---------------------------------------------------------------------------
-# Project root on sys.path
-# ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from dotenv import load_dotenv
+
+from scripts.cv_time_series import run_cv_mm256
+from scripts.preprocessor_MM256 import preprocess_mm256
+from scripts.train_final_mm256 import train_final_mm256
+
 load_dotenv()
 
-SENSOR = "MM256"
-SENSORS_LIST = ["MM256"]
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def _fmt(seconds: float) -> str:
     minutes, remaining = divmod(seconds, 60)
     return f"{int(minutes)}m {remaining:.1f}s" if minutes >= 1 else f"{remaining:.1f}s"
 
 
-# ---------------------------------------------------------------------------
-# Mode 1: Single train/test run (simple LSTM)
-# ---------------------------------------------------------------------------
+def split_temporal_holdout(data, train_ratio: float = 0.7):
+    """Split a time-ordered dataframe into chronological train and holdout test."""
+    if not 0 < train_ratio < 1:
+        raise ValueError("train_ratio must be strictly between 0 and 1")
+
+    split_idx = int(len(data) * train_ratio)
+    if split_idx <= 0 or split_idx >= len(data):
+        raise ValueError("train_ratio produces an empty train or test split")
+
+    train_df = data.iloc[:split_idx].copy()
+    test_df = data.iloc[split_idx:].copy()
+    return train_df, test_df
+
+
 def run_pipeline_mm256(
     source: str = "cache",
     cache_raw: bool = False,
     alert_rate: float = 1.0,
     concentration_threshold: float = 1.0,
-    test_size: float = 0.3,
-    save_preprocess: bool = True,
-    upload_preprocess: bool = False,
-    save_preprocess_bq: bool = False,
+    train_ratio: float = 0.7,
+    n_splits: int = 5,
+    gap: int = 300,
+    window_length: int = 300,
+    forecast_horizon: int = 120,
+    epochs: int = 40,
+    batch_size: int = 128,
+    patience: int = 5,
+    model_variant: str = "advanced",
+    skip_cv: bool = False,
     push_bq: bool = False,
+    save_preprocess: bool = False,
+    upload_preprocess: bool = False,
+    validation_monitor_max_windows: int | None = 8192,
+    save_cv_plots: bool = False,
+    save_final_analysis: bool = False,
 ) -> dict:
-    """Run the full single-run MM256 pipeline: load -> preprocess -> train -> predict -> analyse.
-
-    Trains the **simple LSTM** (one encoder layer).  For the advanced model,
-    swap ``simple_lstm_mm256`` for ``advanced_lstm_mm256`` in this function.
-    """
-    from scripts.preprocessor_MM256 import preprocess_mm256, slice_windows_mm256
-    from ml_logic.model_mm256 import simple_lstm_mm256
-    from ml_logic.model_save import save_model_to_gcs
-    from ml_logic.results_bq_save import save_history_to_bq, save_predictions_to_bq
-    from ml_logic.analysis import plot_loss_curves, plot_predictions_vs_actual, compute_metrics
-    from ml_logic.data import save_preprocessing_artifact
-    from sklearn.model_selection import train_test_split
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    t0 = perf_counter()
+    """Run the full MM256 benchmark workflow."""
+    started = perf_counter()
 
     print(f"\n{'='*60}")
-    print(f"  MM256 Pipeline — single run — {timestamp}")
+    print("  MM256 Workflow")
+    print("  holdout split -> CV on train only -> final train -> holdout test")
     print(f"{'='*60}\n")
 
-    # ---- Step 1: Load & preprocess ----
     step_t = perf_counter()
-    print("Step 1/5 — Loading & preprocessing (MM256 only)...")
-    data, scalers, meta = preprocess_mm256(
+    print("Step 1/4 — Loading & preprocessing (unscaled)...")
+    data, _, preprocessing_meta = preprocess_mm256(
         source=source,
         cache_raw=cache_raw,
         alert_rate=alert_rate,
         concentration_threshold=concentration_threshold,
+        scale=False,
     )
     print(f"  Done in {_fmt(perf_counter() - step_t)}")
 
-    # ---- Step 2: Train / test split + windowing ----
     step_t = perf_counter()
-    print("\nStep 2/5 — Splitting & windowing...")
-
-    # Temporal split (no shuffle)
-    split_idx = int(len(data) * (1 - test_size))
-    train_data = data.iloc[:split_idx]
-    test_data = data.iloc[split_idx:]
-
-    print(f"  Train: {len(train_data):,} rows  |  Test: {len(test_data):,} rows")
-
-    X_train, y_train = slice_windows_mm256(train_data, 0, len(train_data))
-    X_test, y_test = slice_windows_mm256(test_data, 0, len(test_data))
-
-    print(f"  X_train: {X_train.shape}  y_train: {y_train.shape}")
-    print(f"  X_test:  {X_test.shape}   y_test:  {y_test.shape}")
-
-    if save_preprocess:
-        save_preprocessing_artifact(
-            X_train, X_test, y_train, y_test,
-            timestamp=f"mm256_{timestamp}",
-            upload_to_gcs=upload_preprocess,
-        )
+    print("\nStep 2/4 — Temporal holdout split...")
+    train_df, test_df = split_temporal_holdout(data, train_ratio=train_ratio)
+    print(f"  Train rows: {len(train_df):,}  |  Test rows: {len(test_df):,}")
+    print(f"  Train period: {train_df.index.min()} -> {train_df.index.max()}")
+    print(f"  Test period:  {test_df.index.min()} -> {test_df.index.max()}")
     print(f"  Done in {_fmt(perf_counter() - step_t)}")
 
-    # ---- Step 3: Train simple LSTM ----
     step_t = perf_counter()
-    print("\nStep 3/5 — Training simple LSTM (MM256)...")
-
-    if X_train.shape[0] == 0:
-        print("  ERROR: No training windows. Aborting.")
-        return {"error": "no_training_windows"}
-
-    model, history, y_pred = simple_lstm_mm256(
-        X_train, y_train, X_test, y_test,
-    )
-
-    save_model_to_gcs(model, f"mm256_{timestamp}")
-    save_history_to_bq(history, timestamp, table_suffix="mm256")
-    print(f"  Done in {_fmt(perf_counter() - step_t)}")
-
-    # ---- Step 4: Save predictions ----
-    step_t = perf_counter()
-    print("\nStep 4/5 — Saving predictions...")
-
-    if y_test.shape[0] == 0 or y_pred is None:
-        print("  No test windows; skipping prediction export.")
-        pred_df = pd.DataFrame()
+    print("\nStep 3/4 — Cross-validation on train split...")
+    if skip_cv:
+        cv_results = {
+            "timestamp": None,
+            "skipped": True,
+            "recommended_epochs": int(epochs),
+            "aggregate_metrics": {},
+            "fold_metrics": [],
+            "n_splits": 0,
+            "model_variant": model_variant,
+        }
+        print(f"  CV skipped. Using epochs={epochs} for final training.")
     else:
-        pred_df = save_predictions_to_bq(
-            y_test, y_pred, timestamp,
-            sensors=SENSORS_LIST,
-            table_suffix="mm256",
+        cv_results = run_cv_mm256(
+            train_df=train_df,
+            n_splits=n_splits,
+            gap=gap,
+            window_length=window_length,
+            forecast_horizon=forecast_horizon,
+            epochs=epochs,
+            batch_size=batch_size,
+            patience=patience,
+            model_variant=model_variant,
+            push_bq=push_bq,
+            validation_monitor_max_windows=validation_monitor_max_windows,
+            save_plots=save_cv_plots,
         )
+    recommended_epochs = int(cv_results.get("recommended_epochs", epochs))
+    print(f"  Recommended epochs for final fit: {recommended_epochs}")
     print(f"  Done in {_fmt(perf_counter() - step_t)}")
 
-    # ---- Step 5: Analysis ----
     step_t = perf_counter()
-    print("\nStep 5/5 — Generating analysis...")
-
-    plot_loss_curves(history, timestamp, label_prefix="mm256_")
-
-    if y_test.shape[0] > 0 and y_pred is not None:
-        # Sample forecast plot
-        sample_idx = min(100, y_test.shape[0] - 1)
-        plt.figure(figsize=(12, 5))
-        plt.plot(y_test[sample_idx, :, 0], label="Actual", linewidth=2)
-        plt.plot(y_pred[sample_idx, :, 0], label="Simple LSTM", linestyle=":")
-        plt.title(f"MM256 — sample {sample_idx}")
-        plt.xlabel("Forecast step (s)")
-        plt.ylabel("MM256 (scaled)")
-        plt.legend()
-        os.makedirs("results/graphs", exist_ok=True)
-        plt.savefig(f"results/graphs/mm256_forecast_{timestamp}.png", dpi=150)
-        plt.close()
-        print(f"  Saved results/graphs/mm256_forecast_{timestamp}.png")
-
-        if not pred_df.empty:
-            compute_metrics(pred_df, timestamp, sensors=SENSORS_LIST, label_prefix="mm256_")
-            plot_predictions_vs_actual(pred_df, timestamp, sensors=SENSORS_LIST, label_prefix="mm256_")
-
+    print("\nStep 4/4 — Final training on full train split + holdout test...")
+    final_results = train_final_mm256(
+        train_df=train_df,
+        test_df=test_df,
+        recommended_epochs=recommended_epochs,
+        batch_size=batch_size,
+        window_length=window_length,
+        forecast_horizon=forecast_horizon,
+        model_variant=model_variant,
+        push_bq=push_bq,
+        save_preprocess=save_preprocess,
+        upload_preprocess=upload_preprocess,
+        save_analysis_outputs=save_final_analysis,
+    )
     print(f"  Done in {_fmt(perf_counter() - step_t)}")
 
-    total = perf_counter() - t0
+    total = perf_counter() - started
     print(f"\n{'='*60}")
-    print(f"  MM256 pipeline complete: {timestamp} ({_fmt(total)})")
+    print(f"  MM256 workflow complete in {_fmt(total)}")
     print(f"{'='*60}")
 
     return {
-        "timestamp": timestamp,
-        "model": model,
-        "history": history,
-        "predictions": pred_df,
-        "scalers": scalers,
-        "metadata": meta,
+        "preprocessing": preprocessing_meta,
+        "split": {
+            "train_ratio": float(train_ratio),
+            "n_train_rows": int(len(train_df)),
+            "n_test_rows": int(len(test_df)),
+            "train_period": f"{train_df.index.min()} -> {train_df.index.max()}",
+            "test_period": f"{test_df.index.min()} -> {test_df.index.max()}",
+        },
+        "cv": cv_results,
+        "final": final_results,
     }
 
 
-# ---------------------------------------------------------------------------
-# Mode 2: Cross-validated run (delegates to cv_time_series)
-# ---------------------------------------------------------------------------
 def run_cv_pipeline_mm256(
-    n_splits: int = 5,
-    gap: int = 300,
     source: str = "cache",
     cache_raw: bool = False,
     alert_rate: float = 1.0,
     concentration_threshold: float = 1.0,
+    train_ratio: float = 0.7,
+    n_splits: int = 5,
+    gap: int = 300,
+    window_length: int = 300,
+    forecast_horizon: int = 120,
     epochs: int = 40,
-    batch_size: int = 32,
+    batch_size: int = 128,
     patience: int = 5,
+    model_variant: str = "advanced",
     push_bq: bool = False,
+    validation_monitor_max_windows: int | None = 8192,
+    save_cv_plots: bool = False,
 ) -> dict:
-    """Run the MM256 pipeline with TimeSeriesSplit cross-validation.
-
-    This is a thin wrapper around ``cv_time_series.run_cv`` that makes it
-    callable from the same CLI as the single-run mode.
-    """
-    from scripts.cv_time_series import run_cv
-
-    return run_cv(
-        n_splits=n_splits,
-        gap=gap,
+    """Run the CV stage only, using the train portion of a holdout split."""
+    data, _, _ = preprocess_mm256(
         source=source,
         cache_raw=cache_raw,
         alert_rate=alert_rate,
         concentration_threshold=concentration_threshold,
+        scale=False,
+    )
+    train_df, _ = split_temporal_holdout(data, train_ratio=train_ratio)
+    return run_cv_mm256(
+        train_df=train_df,
+        n_splits=n_splits,
+        gap=gap,
+        window_length=window_length,
+        forecast_horizon=forecast_horizon,
         epochs=epochs,
         batch_size=batch_size,
         patience=patience,
+        model_variant=model_variant,
         push_bq=push_bq,
+        validation_monitor_max_windows=validation_monitor_max_windows,
+        save_plots=save_cv_plots,
     )
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="MM256 single-sensor pipeline orchestrator"
-    )
-    parser.add_argument(
-        "--mode", choices=["single", "cv"], default="single",
-        help="'single' = one train/test run; 'cv' = k-fold TimeSeriesSplit"
-    )
+def main():
+    parser = argparse.ArgumentParser(description="MM256 single-sensor workflow")
+    parser.add_argument("--mode", choices=["full", "cv", "single"], default="full")
     parser.add_argument("--source", choices=["bq", "cache", "local"], default="cache")
     parser.add_argument("--cache-raw", action="store_true")
     parser.add_argument("--alert-rate", type=float, default=1.0)
     parser.add_argument("--concentration-threshold", type=float, default=1.0)
-    parser.add_argument("--push-bq", action="store_true")
-
-    # Single-run options
-    parser.add_argument("--test-size", type=float, default=0.3)
-    parser.add_argument("--skip-preprocess-save", action="store_true")
-    parser.add_argument("--upload-preprocess", action="store_true")
-
-    # CV options
+    parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--gap", type=int, default=300)
+    parser.add_argument("--window-length", type=int, default=300)
+    parser.add_argument("--forecast-horizon", type=int, default=120)
     parser.add_argument("--epochs", type=int, default=40)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--patience", type=int, default=5)
-
+    parser.add_argument("--validation-monitor-max-windows", type=int, default=8192)
+    parser.add_argument("--model-variant", choices=["simple", "advanced"], default="advanced")
+    parser.add_argument("--skip-cv", action="store_true")
+    parser.add_argument("--push-bq", action="store_true")
+    parser.add_argument("--save-cv-plots", action="store_true")
+    parser.add_argument("--save-final-analysis", action="store_true")
+    parser.add_argument("--save-preprocess", dest="save_preprocess", action="store_true")
+    parser.add_argument("--skip-preprocess-save", dest="save_preprocess", action="store_false")
+    parser.set_defaults(save_preprocess=False)
+    parser.add_argument("--upload-preprocess", action="store_true")
     args = parser.parse_args()
 
-    if args.mode == "single":
-        run_pipeline_mm256(
+    if args.mode == "cv":
+        run_cv_pipeline_mm256(
             source=args.source,
             cache_raw=args.cache_raw,
             alert_rate=args.alert_rate,
             concentration_threshold=args.concentration_threshold,
-            test_size=args.test_size,
-            save_preprocess=not args.skip_preprocess_save,
-            upload_preprocess=args.upload_preprocess,
-            push_bq=args.push_bq,
-        )
-    else:
-        run_cv_pipeline_mm256(
+            train_ratio=args.train_ratio,
             n_splits=args.n_splits,
             gap=args.gap,
-            source=args.source,
-            cache_raw=args.cache_raw,
-            alert_rate=args.alert_rate,
-            concentration_threshold=args.concentration_threshold,
+            window_length=args.window_length,
+            forecast_horizon=args.forecast_horizon,
             epochs=args.epochs,
             batch_size=args.batch_size,
             patience=args.patience,
+            model_variant=args.model_variant,
             push_bq=args.push_bq,
+            validation_monitor_max_windows=args.validation_monitor_max_windows,
+            save_cv_plots=args.save_cv_plots,
         )
+        return
+
+    run_pipeline_mm256(
+        source=args.source,
+        cache_raw=args.cache_raw,
+        alert_rate=args.alert_rate,
+        concentration_threshold=args.concentration_threshold,
+        train_ratio=args.train_ratio,
+        n_splits=args.n_splits,
+        gap=args.gap,
+        window_length=args.window_length,
+        forecast_horizon=args.forecast_horizon,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        patience=args.patience,
+        model_variant=args.model_variant,
+        skip_cv=args.skip_cv,
+        push_bq=args.push_bq,
+        save_preprocess=args.save_preprocess,
+        upload_preprocess=args.upload_preprocess,
+        validation_monitor_max_windows=args.validation_monitor_max_windows,
+        save_cv_plots=args.save_cv_plots,
+        save_final_analysis=args.save_final_analysis,
+    )
+
+
+if __name__ == "__main__":
+    main()
