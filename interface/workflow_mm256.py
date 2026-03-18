@@ -62,12 +62,12 @@ def run_pipeline_mm256(
     gap: int = 300,
     window_length: int = 300,
     forecast_horizon: int = 120,
-    epochs: int = 40,
+    epochs: int = 5,
     batch_size: int = 128,
     patience: int = 5,
     model_variant: str = "advanced",
     pinball_quantile: float = 0.8,
-    skip_cv: bool = False,
+    skip_cv: bool = True,
     push_bq: bool = False,
     save_preprocess: bool = False,
     upload_preprocess: bool = False,
@@ -252,13 +252,14 @@ def main():
     parser.add_argument("--gap", type=int, default=300)
     parser.add_argument("--window-length", type=int, default=300)
     parser.add_argument("--forecast-horizon", type=int, default=120)
-    parser.add_argument("--epochs", type=int, default=40)
+    parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--pinball-quantile", type=float, default=0.8)
     parser.add_argument("--validation-monitor-max-windows", type=int, default=8192)
     parser.add_argument("--model-variant", choices=["simple", "advanced"], default="advanced")
-    parser.add_argument("--skip-cv", action="store_true")
+    parser.add_argument("--skip-cv", action="store_true", default=True)
+    parser.add_argument("--run-cv", dest="skip_cv", action="store_false")
     parser.add_argument("--push-bq", action="store_true")
     parser.add_argument("--save-cv-plots", action="store_true")
     parser.add_argument("--save-final-analysis", action="store_true")
