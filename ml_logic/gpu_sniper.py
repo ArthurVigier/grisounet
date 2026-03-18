@@ -25,14 +25,21 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ZONE_FILTERS = (
-    "europe-west",
-    "europe-north",
-    "europe-southwest",
-    "europe-central",
-)
+DEFAULT_ZONE_FILTERS = ("europe",)
 DEFAULT_TARGETS_JSON = json.dumps(
     [
+        {
+            "gpu_type": "nvidia-h100-80gb",
+            "machine_type": "a3-highgpu-1g",
+            "attach_accelerator": False,
+            "accelerator_count": 1,
+        },
+        {
+            "gpu_type": "nvidia-a100-80gb",
+            "machine_type": "a2-ultragpu-1g",
+            "attach_accelerator": False,
+            "accelerator_count": 1,
+        },
         {
             "gpu_type": "nvidia-tesla-a100",
             "machine_type": "a2-highgpu-1g",
@@ -63,6 +70,19 @@ DEFAULT_TARGETS_JSON = json.dumps(
             "attach_accelerator": True,
             "accelerator_count": 1,
         },
+        {
+            "gpu_type": "nvidia-tesla-p4",
+            "machine_type": "n1-standard-4",
+            "attach_accelerator": True,
+            "accelerator_count": 1,
+        },
+        {
+            "gpu_type": "nvidia-tesla-k80",
+            "machine_type": "n1-standard-4",
+            "attach_accelerator": True,
+            "accelerator_count": 1,
+        },
+>>>>>>> Stashed changes
     ]
 )
 
