@@ -82,7 +82,6 @@ DEFAULT_TARGETS_JSON = json.dumps(
             "attach_accelerator": True,
             "accelerator_count": 1,
         },
->>>>>>> Stashed changes
     ]
 )
 
