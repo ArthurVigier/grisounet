@@ -83,6 +83,7 @@ def train_final_mm256(
     upload_preprocess: bool = False,
     save_analysis_outputs: bool = False,
     use_catch22: bool = True,
+    include_secondary_diagnostics: bool = False,
 ) -> dict:
     """Train on the full train split and evaluate once on the holdout test split."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -165,15 +166,40 @@ def train_final_mm256(
     y_pred = model.predict(test_inputs, batch_size=predict_batch_size, verbose=0)
     y_baseline = build_last_input_baseline(X_test, target_feature_idx, y_test.shape[1])
 
-    model_metrics = compute_mm256_metrics(y_test, y_pred)
-    baseline_metrics = compute_mm256_metrics(y_test, y_baseline)
+    model_metrics = compute_mm256_metrics(
+        y_test,
+        y_pred,
+        include_secondary_diagnostics=include_secondary_diagnostics,
+    )
+    baseline_metrics = compute_mm256_metrics(
+        y_test,
+        y_baseline,
+        include_secondary_diagnostics=include_secondary_diagnostics,
+    )
     improvement_metrics = {
         f"improvement_vs_baseline_{key}": round(
             baseline_metrics[key] - model_metrics[key],
-            6 if key != "MAPE_%" else 4,
+            6,
         )
         for key in model_metrics
     }
+
+    print(
+        f"  Pinball q=0.9: model={model_metrics['pinball_90']:.5f}"
+        f" | baseline={baseline_metrics['pinball_90']:.5f}"
+        f" | gain={improvement_metrics['improvement_vs_baseline_pinball_90']:.5f}"
+    )
+    if include_secondary_diagnostics:
+        print(
+            f"  MAE: model={model_metrics['MAE']:.5f}"
+            f" | baseline={baseline_metrics['MAE']:.5f}"
+            f" | gain={improvement_metrics['improvement_vs_baseline_MAE']:.5f}"
+        )
+        print(
+            f"  RMSE: model={model_metrics['RMSE']:.5f}"
+            f" | baseline={baseline_metrics['RMSE']:.5f}"
+            f" | gain={improvement_metrics['improvement_vs_baseline_RMSE']:.5f}"
+        )
 
     model_timestamp = save_model_to_gcs(model, f"mm256_{timestamp}")
     metadata = {
@@ -248,6 +274,7 @@ def train_final_mm256(
         "recommended_epochs": int(recommended_epochs),
         "model_timestamp": model_timestamp,
         "use_catch22": bool(catch22_meta["enabled"]),
+        "include_secondary_diagnostics": bool(include_secondary_diagnostics),
         "n_catch22_features": int(catch22_meta["n_catch22_features"]),
     }
     os.makedirs("results/final_metrics", exist_ok=True)

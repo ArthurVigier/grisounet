@@ -71,6 +71,7 @@ def run_pipeline_mm256(
     save_cv_plots: bool = False,
     save_final_analysis: bool = False,
     use_catch22: bool = True,
+    include_secondary_diagnostics: bool = False,
 ) -> dict:
     """Run the full MM256 benchmark workflow."""
     started = perf_counter()
@@ -127,6 +128,7 @@ def run_pipeline_mm256(
             validation_monitor_max_windows=validation_monitor_max_windows,
             save_plots=save_cv_plots,
             use_catch22=use_catch22,
+            include_secondary_diagnostics=include_secondary_diagnostics,
         )
     recommended_epochs = int(cv_results.get("recommended_epochs", epochs))
     print(f"  Recommended epochs for final fit: {recommended_epochs}")
@@ -147,6 +149,7 @@ def run_pipeline_mm256(
         upload_preprocess=upload_preprocess,
         save_analysis_outputs=save_final_analysis,
         use_catch22=use_catch22,
+        include_secondary_diagnostics=include_secondary_diagnostics,
     )
     print(f"  Done in {_fmt(perf_counter() - step_t)}")
 
@@ -187,6 +190,7 @@ def run_cv_pipeline_mm256(
     validation_monitor_max_windows: int | None = 8192,
     save_cv_plots: bool = False,
     use_catch22: bool = True,
+    include_secondary_diagnostics: bool = False,
 ) -> dict:
     """Run the CV stage only, using the train portion of a holdout split."""
     data, _, _ = preprocess_mm256(
@@ -211,6 +215,7 @@ def run_cv_pipeline_mm256(
         validation_monitor_max_windows=validation_monitor_max_windows,
         save_plots=save_cv_plots,
         use_catch22=use_catch22,
+        include_secondary_diagnostics=include_secondary_diagnostics,
     )
 
 
@@ -241,6 +246,7 @@ def main():
     parser.add_argument("--upload-preprocess", action="store_true")
     parser.add_argument("--use-catch22", dest="use_catch22", action="store_true")
     parser.add_argument("--disable-catch22", dest="use_catch22", action="store_false")
+    parser.add_argument("--include-secondary-diagnostics", action="store_true")
     parser.set_defaults(use_catch22=True)
     args = parser.parse_args()
 
@@ -263,6 +269,7 @@ def main():
             validation_monitor_max_windows=args.validation_monitor_max_windows,
             save_cv_plots=args.save_cv_plots,
             use_catch22=args.use_catch22,
+            include_secondary_diagnostics=args.include_secondary_diagnostics,
         )
         return
 
@@ -288,6 +295,7 @@ def main():
         save_cv_plots=args.save_cv_plots,
         save_final_analysis=args.save_final_analysis,
         use_catch22=args.use_catch22,
+        include_secondary_diagnostics=args.include_secondary_diagnostics,
     )
 
 

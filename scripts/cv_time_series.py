@@ -29,7 +29,15 @@ from scripts.preprocessor_MM256 import (
 )
 
 
-METRIC_KEYS = ("MAE", "RMSE", "MAPE_%", "pinball_90")
+PRIMARY_METRIC_KEYS = ("pinball_90",)
+SECONDARY_METRIC_KEYS = ("MAE", "RMSE")
+
+
+def get_metric_keys(include_secondary_diagnostics: bool = False) -> tuple[str, ...]:
+    """Return the ordered metric keys for the MM256 reporting layer."""
+    if include_secondary_diagnostics:
+        return PRIMARY_METRIC_KEYS + SECONDARY_METRIC_KEYS
+    return PRIMARY_METRIC_KEYS
 
 
 def _get_pyplot():
@@ -41,7 +49,11 @@ def _get_pyplot():
     return plt
 
 
-def compute_mm256_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+def compute_mm256_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    include_secondary_diagnostics: bool = True,
+) -> dict:
     """Compute regression metrics for MM256 forecasts."""
     residual = y_true.ravel() - y_pred.ravel()
     actual = y_true.ravel()
@@ -49,27 +61,36 @@ def compute_mm256_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 
     mae = float(np.mean(np.abs(residual)))
     rmse = float(np.sqrt(np.mean(residual ** 2)))
-    mape = float(np.mean(np.abs(residual) / (np.abs(actual) + 1e-8)) * 100)
     error = actual - predicted
     q = 0.9
     pinball = float(np.mean(np.maximum(q * error, (q - 1) * error)))
 
-    return {
-        "MAE": round(mae, 6),
-        "RMSE": round(rmse, 6),
-        "MAPE_%": round(mape, 4),
+    metrics = {
         "pinball_90": round(pinball, 6),
     }
+    if include_secondary_diagnostics:
+        metrics["MAE"] = round(mae, 6)
+        metrics["RMSE"] = round(rmse, 6)
+    return metrics
 
 
-def compute_mm256_horizon_metrics(y_true: np.ndarray, y_pred: np.ndarray, label: str) -> pd.DataFrame:
+def compute_mm256_horizon_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    label: str,
+    include_secondary_diagnostics: bool = True,
+) -> pd.DataFrame:
     """Compute per-step forecast metrics for one prediction source."""
     records = []
     horizon = y_true.shape[1]
     for forecast_step in range(horizon):
         step_true = y_true[:, forecast_step:forecast_step + 1, :]
         step_pred = y_pred[:, forecast_step:forecast_step + 1, :]
-        step_metrics = compute_mm256_metrics(step_true, step_pred)
+        step_metrics = compute_mm256_metrics(
+            step_true,
+            step_pred,
+            include_secondary_diagnostics=include_secondary_diagnostics,
+        )
         bias = float(np.mean(step_pred.ravel() - step_true.ravel()))
         records.append(
             {
@@ -107,23 +128,31 @@ def build_last_input_baseline(X: np.ndarray, target_feature_idx: int, horizon: i
     return np.repeat(last_seen[:, None, None], horizon, axis=1)
 
 
-def _merge_model_and_baseline_metrics(model_metrics: dict, baseline_metrics: dict) -> dict:
+def _merge_model_and_baseline_metrics(
+    model_metrics: dict,
+    baseline_metrics: dict,
+    metric_keys: tuple[str, ...],
+) -> dict:
     merged = dict(model_metrics)
     merged.update({f"baseline_{key}": value for key, value in baseline_metrics.items()})
-    for key in METRIC_KEYS:
+    for key in metric_keys:
         merged[f"improvement_vs_baseline_{key}"] = round(
             baseline_metrics[key] - model_metrics[key],
-            6 if key != "MAPE_%" else 4,
+            6,
         )
     return merged
 
 
-def _aggregate_cv_metrics(ok_folds: list[dict], n_splits: int) -> dict:
+def _aggregate_cv_metrics(
+    ok_folds: list[dict],
+    n_splits: int,
+    metric_keys: tuple[str, ...],
+) -> dict:
     if not ok_folds:
         return {"error": "All folds skipped"}
 
     agg = {}
-    for key in METRIC_KEYS:
+    for key in metric_keys:
         vals = [m[key] for m in ok_folds]
         baseline_vals = [m[f"baseline_{key}"] for m in ok_folds]
         gain_vals = [m[f"improvement_vs_baseline_{key}"] for m in ok_folds]
@@ -148,21 +177,22 @@ def _aggregate_horizon_metrics(horizon_frames: list[pd.DataFrame]) -> pd.DataFra
         return pd.DataFrame()
 
     all_horizon = pd.concat(horizon_frames, ignore_index=True)
+    agg_spec = {
+        "pinball_mean": ("pinball_90", "mean"),
+        "pinball_std": ("pinball_90", "std"),
+        "bias_mean": ("bias", "mean"),
+        "bias_std": ("bias", "std"),
+        "n_folds": ("forecast_step", "size"),
+    }
+    if "MAE" in all_horizon.columns:
+        agg_spec["MAE_mean"] = ("MAE", "mean")
+        agg_spec["MAE_std"] = ("MAE", "std")
+    if "RMSE" in all_horizon.columns:
+        agg_spec["RMSE_mean"] = ("RMSE", "mean")
+        agg_spec["RMSE_std"] = ("RMSE", "std")
     summary = (
         all_horizon.groupby(["label", "forecast_step"])
-        .agg(
-            MAE_mean=("MAE", "mean"),
-            MAE_std=("MAE", "std"),
-            RMSE_mean=("RMSE", "mean"),
-            RMSE_std=("RMSE", "std"),
-            MAPE_mean=("MAPE_%", "mean"),
-            MAPE_std=("MAPE_%", "std"),
-            pinball_mean=("pinball_90", "mean"),
-            pinball_std=("pinball_90", "std"),
-            bias_mean=("bias", "mean"),
-            bias_std=("bias", "std"),
-            n_folds=("forecast_step", "size"),
-        )
+        .agg(**agg_spec)
         .reset_index()
         .fillna(0.0)
     )
@@ -175,12 +205,16 @@ def _plot_horizon_summary(horizon_summary: pd.DataFrame, output_path: str):
         return
     plt = _get_pyplot()
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 4.5), sharex=True)
-    plot_specs = [
-        ("MAE", "MAE_mean", "MAE_std"),
-        ("RMSE", "RMSE_mean", "RMSE_std"),
-        ("Bias", "bias_mean", "bias_std"),
-    ]
+    plot_specs = [("Pinball q=0.9", "pinball_mean", "pinball_std")]
+    if {"MAE_mean", "MAE_std"}.issubset(horizon_summary.columns):
+        plot_specs.append(("MAE", "MAE_mean", "MAE_std"))
+    if {"RMSE_mean", "RMSE_std"}.issubset(horizon_summary.columns):
+        plot_specs.append(("RMSE", "RMSE_mean", "RMSE_std"))
+    plot_specs.append(("Bias", "bias_mean", "bias_std"))
+
+    fig, axes = plt.subplots(1, len(plot_specs), figsize=(6 * len(plot_specs), 4.5), sharex=True)
+    if len(plot_specs) == 1:
+        axes = [axes]
     color_map = {"model": "#1565c0", "baseline": "#ef6c00"}
 
     for ax, (title, mean_col, std_col) in zip(axes, plot_specs):
@@ -219,6 +253,7 @@ def run_cv_mm256(
     validation_monitor_max_windows: int | None = 8192,
     save_plots: bool = False,
     use_catch22: bool = True,
+    include_secondary_diagnostics: bool = False,
 ) -> dict:
     """Run cross-validation on a pre-split MM256 training dataframe."""
     import tensorflow as tf
@@ -236,6 +271,7 @@ def run_cv_mm256(
 
     tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
     indices = np.arange(len(train_df))
+    metric_keys = get_metric_keys(include_secondary_diagnostics=include_secondary_diagnostics)
     fold_metrics = []
     fold_histories = []
     fold_horizon_metrics = []
@@ -340,8 +376,18 @@ def run_cv_mm256(
         y_baseline = build_last_input_baseline(X_val, target_feature_idx, y_val.shape[1])
         fold_horizon = pd.concat(
             [
-                compute_mm256_horizon_metrics(y_val, y_pred, label="model"),
-                compute_mm256_horizon_metrics(y_val, y_baseline, label="baseline"),
+                compute_mm256_horizon_metrics(
+                    y_val,
+                    y_pred,
+                    label="model",
+                    include_secondary_diagnostics=include_secondary_diagnostics,
+                ),
+                compute_mm256_horizon_metrics(
+                    y_val,
+                    y_baseline,
+                    label="baseline",
+                    include_secondary_diagnostics=include_secondary_diagnostics,
+                ),
             ],
             ignore_index=True,
         )
@@ -349,8 +395,17 @@ def run_cv_mm256(
         fold_horizon_metrics.append(fold_horizon)
 
         metrics = _merge_model_and_baseline_metrics(
-            compute_mm256_metrics(y_val, y_pred),
-            compute_mm256_metrics(y_val, y_baseline),
+            compute_mm256_metrics(
+                y_val,
+                y_pred,
+                include_secondary_diagnostics=include_secondary_diagnostics,
+            ),
+            compute_mm256_metrics(
+                y_val,
+                y_baseline,
+                include_secondary_diagnostics=include_secondary_diagnostics,
+            ),
+            metric_keys=metric_keys,
         )
         metrics["fold"] = fold_idx
         metrics["status"] = "ok"
@@ -367,15 +422,21 @@ def run_cv_mm256(
         fold_metrics.append(metrics)
 
         print(
-            f"  MAE: model={metrics['MAE']:.5f}"
-            f" | baseline={metrics['baseline_MAE']:.5f}"
-            f" | gain={metrics['improvement_vs_baseline_MAE']:.5f}"
+            f"  Pinball q=0.9: model={metrics['pinball_90']:.5f}"
+            f" | baseline={metrics['baseline_pinball_90']:.5f}"
+            f" | gain={metrics['improvement_vs_baseline_pinball_90']:.5f}"
         )
-        print(
-            f"  RMSE: model={metrics['RMSE']:.5f}"
-            f" | baseline={metrics['baseline_RMSE']:.5f}"
-            f" | gain={metrics['improvement_vs_baseline_RMSE']:.5f}"
-        )
+        if include_secondary_diagnostics:
+            print(
+                f"  MAE: model={metrics['MAE']:.5f}"
+                f" | baseline={metrics['baseline_MAE']:.5f}"
+                f" | gain={metrics['improvement_vs_baseline_MAE']:.5f}"
+            )
+            print(
+                f"  RMSE: model={metrics['RMSE']:.5f}"
+                f" | baseline={metrics['baseline_RMSE']:.5f}"
+                f" | gain={metrics['improvement_vs_baseline_RMSE']:.5f}"
+            )
 
         if save_plots:
             plt = _get_pyplot()
@@ -412,8 +473,9 @@ def run_cv_mm256(
         gc.collect()
 
     ok_folds = [metric for metric in fold_metrics if metric.get("status") == "ok"]
-    agg = _aggregate_cv_metrics(ok_folds, n_splits)
+    agg = _aggregate_cv_metrics(ok_folds, n_splits, metric_keys=metric_keys)
     agg["use_catch22"] = bool(use_catch22)
+    agg["include_secondary_diagnostics"] = bool(include_secondary_diagnostics)
     agg["n_catch22_features"] = int(
         max((metric.get("n_catch22_features", 0) for metric in ok_folds), default=0)
     )
@@ -427,13 +489,19 @@ def run_cv_mm256(
             f" (median best epoch across folds)"
         )
         print(
-            f"  MAE:  model={agg['MAE_mean']:.5f} | baseline={agg['baseline_MAE_mean']:.5f}"
-            f" | gain={agg['improvement_vs_baseline_MAE_mean']:.5f}"
+            f"  Pinball q=0.9: model={agg['pinball_90_mean']:.5f}"
+            f" | baseline={agg['baseline_pinball_90_mean']:.5f}"
+            f" | gain={agg['improvement_vs_baseline_pinball_90_mean']:.5f}"
         )
-        print(
-            f"  RMSE: model={agg['RMSE_mean']:.5f} | baseline={agg['baseline_RMSE_mean']:.5f}"
-            f" | gain={agg['improvement_vs_baseline_RMSE_mean']:.5f}"
-        )
+        if include_secondary_diagnostics:
+            print(
+                f"  MAE:  model={agg['MAE_mean']:.5f} | baseline={agg['baseline_MAE_mean']:.5f}"
+                f" | gain={agg['improvement_vs_baseline_MAE_mean']:.5f}"
+            )
+            print(
+                f"  RMSE: model={agg['RMSE_mean']:.5f} | baseline={agg['baseline_RMSE_mean']:.5f}"
+                f" | gain={agg['improvement_vs_baseline_RMSE_mean']:.5f}"
+            )
 
     metrics_df = pd.DataFrame(fold_metrics)
     results_dir = os.path.join(PROJECT_ROOT, "results", "cv_metrics")
@@ -465,13 +533,18 @@ def run_cv_mm256(
 
     if save_plots and len(ok_folds) > 1:
         plt = _get_pyplot()
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+        metric_specs = [("pinball_90", "seagreen")]
+        if include_secondary_diagnostics:
+            metric_specs = [
+                ("pinball_90", "seagreen"),
+                ("MAE", "steelblue"),
+                ("RMSE", "tomato"),
+            ]
+        fig, axes = plt.subplots(1, len(metric_specs), figsize=(5 * len(metric_specs), 4))
+        if len(metric_specs) == 1:
+            axes = [axes]
         fold_nums = [m["fold"] for m in ok_folds]
-        for ax, key, color in zip(
-            axes,
-            ["MAE", "RMSE", "pinball_90"],
-            ["steelblue", "tomato", "seagreen"],
-        ):
+        for ax, (key, color) in zip(axes, metric_specs):
             vals = [m[key] for m in ok_folds]
             baseline_vals = [m[f"baseline_{key}"] for m in ok_folds]
             ax.bar(fold_nums, vals, color=color, alpha=0.8)
@@ -501,6 +574,7 @@ def run_cv_mm256(
         "n_splits": n_splits,
         "model_variant": model_variant,
         "use_catch22": bool(use_catch22),
+        "include_secondary_diagnostics": bool(include_secondary_diagnostics),
         "metrics_path": metrics_path,
         "aggregate_path": agg_path,
         "horizon_metrics_path": horizon_metrics_path,
@@ -551,6 +625,7 @@ def main():
     parser.add_argument("--save-plots", action="store_true")
     parser.add_argument("--use-catch22", dest="use_catch22", action="store_true")
     parser.add_argument("--disable-catch22", dest="use_catch22", action="store_false")
+    parser.add_argument("--include-secondary-diagnostics", action="store_true")
     parser.set_defaults(use_catch22=True)
     args = parser.parse_args()
 
@@ -578,6 +653,7 @@ def main():
         validation_monitor_max_windows=args.validation_monitor_max_windows,
         save_plots=args.save_plots,
         use_catch22=args.use_catch22,
+        include_secondary_diagnostics=args.include_secondary_diagnostics,
     )
 
 
