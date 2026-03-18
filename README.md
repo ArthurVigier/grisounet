@@ -50,14 +50,15 @@ uses the repo's current compute defaults instead of hard-coded upstream values.
 Default behavior:
 
 - Targets the Compute Engine project from `GCP_COMPUTE_PROJECT` and falls back to `GCP_PROJECT`
-- Uses `GCP_REGION` as the zone discovery filter
+- Probes `europe-west4` (Netherlands), `europe-west2` (London), and `europe-west3` (Germany) by default
 - Uses `IMAGE_PROJECT` and `IMAGE_FAMILY` for the boot disk image
 - Tries both `nvidia-l4` on `g2-standard-4` and `nvidia-tesla-t4` on `n1-standard-4`
 
 Useful commands:
 
 - Dry run the discovery and print the exact `gcloud` commands: `python scripts/gpu_sniper.py --dry-run`
-- Only try L4 in western Europe: `python scripts/gpu_sniper.py --gpu nvidia-l4 --region-filter europe-west4`
+- Only try L4 in the default regions: `python scripts/gpu_sniper.py --gpu nvidia-l4`
+- Override the regions manually: `python scripts/gpu_sniper.py --gpu nvidia-tesla-t4 --region-filter europe-west4 --region-filter europe-west2 --region-filter europe-west3`
 - Provide a custom target list: `python scripts/gpu_sniper.py --targets-json '[{"gpu_type":"nvidia-l4","machine_type":"g2-standard-4","attach_accelerator":false}]'`
 
 Optional environment variables:

@@ -25,6 +25,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_ZONE_FILTERS = (
+    "europe-west4",  # Netherlands
+    "europe-west2",  # London
+    "europe-west3",  # Germany
+)
 DEFAULT_TARGETS_JSON = json.dumps(
     [
         {
@@ -136,13 +141,7 @@ def _default_zone_filters() -> tuple[str, ...]:
     filters = _coerce_csv(os.getenv("GPU_SNIPER_ZONE_FILTERS"))
     if filters:
         return filters
-    region = os.getenv("GCP_REGION")
-    if region:
-        return (region,)
-    zone = os.getenv("ZONE")
-    if zone and "-" in zone:
-        return (zone.rsplit("-", 1)[0],)
-    return ("europe-west1",)
+    return DEFAULT_ZONE_FILTERS
 
 
 def _default_project_id() -> str:
@@ -554,6 +553,23 @@ class GpuSniper:
             self.log("  " + " ".join(command))
         return 0
 
+    def instance_exists(self, instance_name: str, zone: str) -> bool:
+        payload = run_gcloud(
+            [
+                "gcloud",
+                "compute",
+                "instances",
+                "describe",
+                instance_name,
+                f"--project={self.config.project_id}",
+                f"--zone={zone}",
+            ],
+            project_id=self.config.project_id,
+            expect_json=True,
+            tolerate_errors=True,
+        )
+        return isinstance(payload, dict) and payload.get("name") == instance_name
+
     def create_vm(self, zone: str, target: GpuTarget) -> bool:
         if self.stop_event.is_set():
             return False
@@ -585,12 +601,20 @@ class GpuSniper:
         lowered = stderr.lower()
 
         if "already exists" in lowered:
-            self.stop_event.set()
-            self.log(f"[SUCCESS] Instance {instance_name} already exists in {zone}.")
+            if self.instance_exists(instance_name, zone):
+                self.stop_event.set()
+                self.log(f"[SUCCESS] Instance {instance_name} already exists in {zone}.")
+                self.log(
+                    f"[SSH] gcloud compute ssh {instance_name} --project={self.config.project_id} --zone={zone}"
+                )
+                return True
+
+            last_line = stderr.splitlines()[-1] if stderr else "Unexpected error."
             self.log(
-                f"[SSH] gcloud compute ssh {instance_name} --project={self.config.project_id} --zone={zone}"
+                f"[Fail] {zone} ({target.gpu_type}): create reported an existing resource, "
+                f"but instance {instance_name} was not found. {last_line}"
             )
-            return True
+            return False
         if any(
             marker in lowered
             for marker in (
