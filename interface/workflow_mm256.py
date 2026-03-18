@@ -60,13 +60,16 @@ def run_pipeline_mm256(
     window_length: int = 300,
     forecast_horizon: int = 120,
     epochs: int = 40,
-    batch_size: int = 32,
+    batch_size: int = 128,
     patience: int = 5,
     model_variant: str = "advanced",
     skip_cv: bool = False,
     push_bq: bool = False,
-    save_preprocess: bool = True,
+    save_preprocess: bool = False,
     upload_preprocess: bool = False,
+    validation_monitor_max_windows: int | None = 8192,
+    save_cv_plots: bool = False,
+    save_final_analysis: bool = False,
 ) -> dict:
     """Run the full MM256 benchmark workflow."""
     started = perf_counter()
@@ -120,6 +123,8 @@ def run_pipeline_mm256(
             patience=patience,
             model_variant=model_variant,
             push_bq=push_bq,
+            validation_monitor_max_windows=validation_monitor_max_windows,
+            save_plots=save_cv_plots,
         )
     recommended_epochs = int(cv_results.get("recommended_epochs", epochs))
     print(f"  Recommended epochs for final fit: {recommended_epochs}")
@@ -138,6 +143,7 @@ def run_pipeline_mm256(
         push_bq=push_bq,
         save_preprocess=save_preprocess,
         upload_preprocess=upload_preprocess,
+        save_analysis_outputs=save_final_analysis,
     )
     print(f"  Done in {_fmt(perf_counter() - step_t)}")
 
@@ -171,10 +177,12 @@ def run_cv_pipeline_mm256(
     window_length: int = 300,
     forecast_horizon: int = 120,
     epochs: int = 40,
-    batch_size: int = 32,
+    batch_size: int = 128,
     patience: int = 5,
     model_variant: str = "advanced",
     push_bq: bool = False,
+    validation_monitor_max_windows: int | None = 8192,
+    save_cv_plots: bool = False,
 ) -> dict:
     """Run the CV stage only, using the train portion of a holdout split."""
     data, _, _ = preprocess_mm256(
@@ -196,6 +204,8 @@ def run_cv_pipeline_mm256(
         patience=patience,
         model_variant=model_variant,
         push_bq=push_bq,
+        validation_monitor_max_windows=validation_monitor_max_windows,
+        save_plots=save_cv_plots,
     )
 
 
@@ -212,12 +222,17 @@ def main():
     parser.add_argument("--window-length", type=int, default=300)
     parser.add_argument("--forecast-horizon", type=int, default=120)
     parser.add_argument("--epochs", type=int, default=40)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--validation-monitor-max-windows", type=int, default=8192)
     parser.add_argument("--model-variant", choices=["simple", "advanced"], default="advanced")
     parser.add_argument("--skip-cv", action="store_true")
     parser.add_argument("--push-bq", action="store_true")
-    parser.add_argument("--skip-preprocess-save", action="store_true")
+    parser.add_argument("--save-cv-plots", action="store_true")
+    parser.add_argument("--save-final-analysis", action="store_true")
+    parser.add_argument("--save-preprocess", dest="save_preprocess", action="store_true")
+    parser.add_argument("--skip-preprocess-save", dest="save_preprocess", action="store_false")
+    parser.set_defaults(save_preprocess=False)
     parser.add_argument("--upload-preprocess", action="store_true")
     args = parser.parse_args()
 
@@ -237,6 +252,8 @@ def main():
             patience=args.patience,
             model_variant=args.model_variant,
             push_bq=args.push_bq,
+            validation_monitor_max_windows=args.validation_monitor_max_windows,
+            save_cv_plots=args.save_cv_plots,
         )
         return
 
@@ -256,8 +273,11 @@ def main():
         model_variant=args.model_variant,
         skip_cv=args.skip_cv,
         push_bq=args.push_bq,
-        save_preprocess=not args.skip_preprocess_save,
+        save_preprocess=args.save_preprocess,
         upload_preprocess=args.upload_preprocess,
+        validation_monitor_max_windows=args.validation_monitor_max_windows,
+        save_cv_plots=args.save_cv_plots,
+        save_final_analysis=args.save_final_analysis,
     )
 
 

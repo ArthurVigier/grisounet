@@ -8,9 +8,6 @@ import sys
 from datetime import datetime
 from time import perf_counter
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
@@ -26,6 +23,15 @@ from scripts.preprocessor_MM256 import TARGET_SENSOR, preprocess_mm256, scale_fo
 
 
 METRIC_KEYS = ("MAE", "RMSE", "MAPE_%", "pinball_90")
+
+
+def _get_pyplot():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return plt
 
 
 def compute_mm256_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
@@ -65,8 +71,24 @@ def compute_mm256_horizon_metrics(y_true: np.ndarray, y_pred: np.ndarray, label:
                 **step_metrics,
                 "bias": round(bias, 6),
             }
-        )
+    )
     return pd.DataFrame(records)
+
+
+def select_validation_monitor_subset(
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    max_windows: int | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Keep only the most recent validation windows for early stopping."""
+    if max_windows is None or max_windows <= 0 or X_val.shape[0] <= max_windows:
+        return X_val, y_val
+    return X_val[-max_windows:], y_val[-max_windows:]
+
+
+def inference_batch_size(batch_size: int) -> int:
+    """Use a larger batch for validation / inference than for training."""
+    return max(int(batch_size), 512)
 
 
 def build_last_input_baseline(X: np.ndarray, target_feature_idx: int, horizon: int) -> np.ndarray:
@@ -144,6 +166,7 @@ def _plot_horizon_summary(horizon_summary: pd.DataFrame, output_path: str):
     """Plot per-step error profiles for model vs baseline."""
     if horizon_summary.empty:
         return
+    plt = _get_pyplot()
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 4.5), sharex=True)
     plot_specs = [
@@ -182,10 +205,12 @@ def run_cv_mm256(
     window_length: int = 300,
     forecast_horizon: int = 120,
     epochs: int = 40,
-    batch_size: int = 32,
+    batch_size: int = 128,
     patience: int = 5,
     model_variant: str = "advanced",
     push_bq: bool = False,
+    validation_monitor_max_windows: int | None = 8192,
+    save_plots: bool = False,
 ) -> dict:
     """Run cross-validation on a pre-split MM256 training dataframe."""
     import tensorflow as tf
@@ -236,9 +261,20 @@ def run_cv_mm256(
 
         feature_cols = [col for col in scaled_val.columns if col != "ALERT"]
         target_feature_idx = feature_cols.index(TARGET_SENSOR)
+        X_val_monitor, y_val_monitor = select_validation_monitor_subset(
+            X_val,
+            y_val,
+            validation_monitor_max_windows,
+        )
+        predict_batch_size = inference_batch_size(batch_size)
 
         print(f"  X_train: {X_train.shape}, y_train: {y_train.shape}")
         print(f"  X_val:   {X_val.shape}, y_val:   {y_val.shape}")
+        if X_val_monitor.shape[0] != X_val.shape[0]:
+            print(
+                f"  Val monitor subset: {X_val_monitor.shape[0]:,}"
+                f" / {X_val.shape[0]:,} windows"
+            )
 
         if X_train.shape[0] == 0:
             print("  WARNING: No training windows — skipping fold.")
@@ -266,13 +302,14 @@ def run_cv_mm256(
             y_train,
             epochs=epochs,
             batch_size=batch_size,
-            validation_data=(X_val, y_val),
+            validation_data=(X_val_monitor, y_val_monitor),
+            validation_batch_size=predict_batch_size,
             callbacks=[early_stop],
-            verbose=1,
+            verbose=2,
         )
         fold_histories.append(history)
 
-        y_pred = model.predict(X_val, batch_size=batch_size)
+        y_pred = model.predict(X_val, batch_size=predict_batch_size, verbose=0)
         y_baseline = build_last_input_baseline(X_val, target_feature_idx, y_val.shape[1])
         fold_horizon = pd.concat(
             [
@@ -292,6 +329,7 @@ def run_cv_mm256(
         metrics["status"] = "ok"
         metrics["n_train_windows"] = int(X_train.shape[0])
         metrics["n_val_windows"] = int(X_val.shape[0])
+        metrics["n_val_monitor_windows"] = int(X_val_monitor.shape[0])
         metrics["n_epochs_trained"] = len(history.history["loss"])
         metrics["best_epoch"] = int(np.argmin(history.history["val_loss"]) + 1)
         metrics["best_val_loss"] = float(np.min(history.history["val_loss"]))
@@ -310,29 +348,32 @@ def run_cv_mm256(
             f" | gain={metrics['improvement_vs_baseline_RMSE']:.5f}"
         )
 
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(history.history["loss"], label="Train loss")
-        ax.plot(history.history["val_loss"], label="Val loss")
-        ax.set_title(f"Fold {fold_idx} — Training & Validation Loss")
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("Loss")
-        ax.legend()
-        plt.tight_layout()
-        fig.savefig(os.path.join(plots_dir, f"fold{fold_idx}_loss_{timestamp}.png"), dpi=150)
-        plt.close(fig)
+        if save_plots:
+            plt = _get_pyplot()
 
-        sample_idx = min(len(y_val) - 1, len(y_val) // 2)
-        fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(y_val[sample_idx, :, 0], label="Actual", linewidth=2)
-        ax.plot(y_pred[sample_idx, :, 0], label=f"{model_variant.title()} LSTM", linestyle=":", linewidth=2)
-        ax.plot(y_baseline[sample_idx, :, 0], label="Last value seen", linestyle="--", linewidth=2)
-        ax.set_title(f"Fold {fold_idx} — MM256 Forecast (sample {sample_idx})")
-        ax.set_xlabel("Forecast step (seconds)")
-        ax.set_ylabel("MM256 (scaled)")
-        ax.legend()
-        plt.tight_layout()
-        fig.savefig(os.path.join(plots_dir, f"fold{fold_idx}_sample_{timestamp}.png"), dpi=150)
-        plt.close(fig)
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.plot(history.history["loss"], label="Train loss")
+            ax.plot(history.history["val_loss"], label="Val loss")
+            ax.set_title(f"Fold {fold_idx} — Training & Validation Loss")
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Loss")
+            ax.legend()
+            plt.tight_layout()
+            fig.savefig(os.path.join(plots_dir, f"fold{fold_idx}_loss_{timestamp}.png"), dpi=150)
+            plt.close(fig)
+
+            sample_idx = min(len(y_val) - 1, len(y_val) // 2)
+            fig, ax = plt.subplots(figsize=(12, 4))
+            ax.plot(y_val[sample_idx, :, 0], label="Actual", linewidth=2)
+            ax.plot(y_pred[sample_idx, :, 0], label=f"{model_variant.title()} LSTM", linestyle=":", linewidth=2)
+            ax.plot(y_baseline[sample_idx, :, 0], label="Last value seen", linestyle="--", linewidth=2)
+            ax.set_title(f"Fold {fold_idx} — MM256 Forecast (sample {sample_idx})")
+            ax.set_xlabel("Forecast step (seconds)")
+            ax.set_ylabel("MM256 (scaled)")
+            ax.legend()
+            plt.tight_layout()
+            fig.savefig(os.path.join(plots_dir, f"fold{fold_idx}_sample_{timestamp}.png"), dpi=150)
+            plt.close(fig)
 
         print(f"  Fold {fold_idx} done in {perf_counter() - fold_t:.1f}s\n")
         del model, X_train, y_train, X_val, y_val, y_pred, y_baseline, scaled_train, scaled_val
@@ -372,7 +413,8 @@ def run_cv_mm256(
     horizon_df.to_csv(horizon_metrics_path, index=False)
     horizon_summary = _aggregate_horizon_metrics(fold_horizon_metrics)
     horizon_summary.to_csv(horizon_summary_path, index=False)
-    _plot_horizon_summary(horizon_summary, horizon_plot_path)
+    if save_plots:
+        _plot_horizon_summary(horizon_summary, horizon_plot_path)
 
     agg_path = os.path.join(results_dir, f"cv_mm256_aggregate_{timestamp}.json")
     with open(agg_path, "w", encoding="utf-8") as stream:
@@ -383,9 +425,11 @@ def run_cv_mm256(
     if not horizon_df.empty:
         print(f"Horizon metrics saved -> {horizon_metrics_path}")
         print(f"Horizon summary saved -> {horizon_summary_path}")
-        print(f"Horizon plot -> {horizon_plot_path}")
+        if save_plots:
+            print(f"Horizon plot -> {horizon_plot_path}")
 
-    if len(ok_folds) > 1:
+    if save_plots and len(ok_folds) > 1:
+        plt = _get_pyplot()
         fig, axes = plt.subplots(1, 3, figsize=(15, 4))
         fold_nums = [m["fold"] for m in ok_folds]
         for ax, key, color in zip(
@@ -425,7 +469,7 @@ def run_cv_mm256(
         "aggregate_path": agg_path,
         "horizon_metrics_path": horizon_metrics_path,
         "horizon_summary_path": horizon_summary_path,
-        "horizon_plot_path": horizon_plot_path,
+        "horizon_plot_path": horizon_plot_path if save_plots else None,
     }
 
 
@@ -463,10 +507,12 @@ def main():
     parser.add_argument("--window-length", type=int, default=300)
     parser.add_argument("--forecast-horizon", type=int, default=120)
     parser.add_argument("--epochs", type=int, default=40)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--validation-monitor-max-windows", type=int, default=8192)
     parser.add_argument("--model-variant", choices=["simple", "advanced"], default="advanced")
     parser.add_argument("--push-bq", action="store_true")
+    parser.add_argument("--save-plots", action="store_true")
     args = parser.parse_args()
 
     data, _, _ = preprocess_mm256(
@@ -490,6 +536,8 @@ def main():
         patience=args.patience,
         model_variant=args.model_variant,
         push_bq=args.push_bq,
+        validation_monitor_max_windows=args.validation_monitor_max_windows,
+        save_plots=args.save_plots,
     )
 
 

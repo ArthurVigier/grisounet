@@ -6,9 +6,6 @@ import sys
 from datetime import datetime
 from time import perf_counter
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -22,7 +19,7 @@ from ml_logic.data import save_preprocessing_artifact
 from ml_logic.model_mm256 import build_mm256_model
 from ml_logic.model_save import save_model_artifacts_to_gcs, save_model_to_gcs
 from ml_logic.results_bq_save import save_history_to_bq, save_predictions_to_bq
-from scripts.cv_time_series import build_last_input_baseline, compute_mm256_metrics
+from scripts.cv_time_series import build_last_input_baseline, compute_mm256_metrics, inference_batch_size
 from scripts.preprocessor_MM256 import TARGET_SENSOR, scale_fold, slice_windows_mm256
 
 
@@ -58,17 +55,27 @@ def _save_history_local(history, timestamp: str, table_suffix: str) -> str:
     return history_path
 
 
+def _get_pyplot():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return plt
+
+
 def train_final_mm256(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     recommended_epochs: int,
-    batch_size: int = 32,
+    batch_size: int = 128,
     window_length: int = 300,
     forecast_horizon: int = 120,
     model_variant: str = "advanced",
     push_bq: bool = False,
-    save_preprocess: bool = True,
+    save_preprocess: bool = False,
     upload_preprocess: bool = False,
+    save_analysis_outputs: bool = False,
 ) -> dict:
     """Train on the full train split and evaluate once on the holdout test split."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -128,9 +135,10 @@ def train_final_mm256(
         y_train,
         epochs=recommended_epochs,
         batch_size=batch_size,
-        verbose=1,
+        verbose=2,
     )
-    y_pred = model.predict(X_test, batch_size=batch_size)
+    predict_batch_size = inference_batch_size(batch_size)
+    y_pred = model.predict(X_test, batch_size=predict_batch_size, verbose=0)
     y_baseline = build_last_input_baseline(X_test, target_feature_idx, y_test.shape[1])
 
     model_metrics = compute_mm256_metrics(y_test, y_pred)
@@ -160,6 +168,7 @@ def train_final_mm256(
     }
     artifact_paths = save_model_artifacts_to_gcs(model_timestamp, scalers=scalers, metadata=metadata)
 
+    pred_df = None
     if push_bq:
         save_history_to_bq(history, timestamp, table_suffix="mm256_final")
         pred_df = save_predictions_to_bq(
@@ -169,29 +178,34 @@ def train_final_mm256(
             sensors=[TARGET_SENSOR],
             table_suffix="mm256_final",
         )
-    else:
+    elif save_analysis_outputs:
         _save_history_local(history, timestamp, "mm256_final")
         pred_df = _build_prediction_df(y_test, y_pred, timestamp, "mm256_final")
 
-    plot_loss_curves(history, timestamp, label_prefix="mm256_final_")
+    sample_plot_path = None
+    metrics_df = pd.DataFrame([{"sensor": TARGET_SENSOR, **model_metrics}])
+    if save_analysis_outputs or push_bq:
+        plot_loss_curves(history, timestamp, label_prefix="mm256_final_")
 
-    sample_idx = min(100, y_test.shape[0] - 1)
-    plt.figure(figsize=(12, 5))
-    plt.plot(y_test[sample_idx, :, 0], label="Actual", linewidth=2)
-    plt.plot(y_pred[sample_idx, :, 0], label=f"{model_variant.title()} LSTM", linestyle=":")
-    plt.plot(y_baseline[sample_idx, :, 0], label="Last value seen", linestyle="--")
-    plt.title(f"MM256 — holdout test sample {sample_idx}")
-    plt.xlabel("Forecast step (s)")
-    plt.ylabel("MM256 (scaled)")
-    plt.legend()
-    os.makedirs("results/graphs", exist_ok=True)
-    sample_plot_path = f"results/graphs/mm256_final_forecast_{timestamp}.png"
-    plt.savefig(sample_plot_path, dpi=150)
-    plt.close()
-    print(f"Sample forecast -> {sample_plot_path}")
+        plt = _get_pyplot()
+        sample_idx = min(100, y_test.shape[0] - 1)
+        plt.figure(figsize=(12, 5))
+        plt.plot(y_test[sample_idx, :, 0], label="Actual", linewidth=2)
+        plt.plot(y_pred[sample_idx, :, 0], label=f"{model_variant.title()} LSTM", linestyle=":")
+        plt.plot(y_baseline[sample_idx, :, 0], label="Last value seen", linestyle="--")
+        plt.title(f"MM256 — holdout test sample {sample_idx}")
+        plt.xlabel("Forecast step (s)")
+        plt.ylabel("MM256 (scaled)")
+        plt.legend()
+        os.makedirs("results/graphs", exist_ok=True)
+        sample_plot_path = f"results/graphs/mm256_final_forecast_{timestamp}.png"
+        plt.savefig(sample_plot_path, dpi=150)
+        plt.close()
+        print(f"Sample forecast -> {sample_plot_path}")
 
-    metrics_df = compute_metrics(pred_df, timestamp, sensors=[TARGET_SENSOR], label_prefix="mm256_final_")
-    plot_predictions_vs_actual(pred_df, timestamp, sensors=[TARGET_SENSOR], label_prefix="mm256_final_")
+        if pred_df is not None:
+            metrics_df = compute_metrics(pred_df, timestamp, sensors=[TARGET_SENSOR], label_prefix="mm256_final_")
+            plot_predictions_vs_actual(pred_df, timestamp, sensors=[TARGET_SENSOR], label_prefix="mm256_final_")
 
     final_metrics = {
         "model_metrics": model_metrics,
@@ -217,4 +231,5 @@ def train_final_mm256(
         "metrics_df": metrics_df,
         "final_metrics": final_metrics,
         "artifact_paths": artifact_paths,
+        "sample_plot_path": sample_plot_path,
     }

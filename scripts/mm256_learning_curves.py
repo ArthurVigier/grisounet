@@ -25,7 +25,12 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from ml_logic.model_mm256 import build_mm256_model
-from scripts.cv_time_series import build_last_input_baseline, compute_mm256_metrics
+from scripts.cv_time_series import (
+    build_last_input_baseline,
+    compute_mm256_metrics,
+    inference_batch_size,
+    select_validation_monitor_subset,
+)
 from scripts.preprocessor_MM256 import TARGET_SENSOR, preprocess_mm256, scale_fold, slice_windows_mm256
 
 
@@ -118,9 +123,10 @@ def run_mm256_learning_curves(
     window_length: int = 300,
     forecast_horizon: int = 120,
     epochs: int = 40,
-    batch_size: int = 32,
+    batch_size: int = 128,
     patience: int = 5,
     model_variant: str = "advanced",
+    validation_monitor_max_windows: int | None = 8192,
 ) -> dict:
     import tensorflow as tf
 
@@ -179,6 +185,17 @@ def run_mm256_learning_curves(
 
         feature_cols = [col for col in scaled_val.columns if col != "ALERT"]
         target_feature_idx = feature_cols.index(TARGET_SENSOR)
+        X_val_monitor, y_val_monitor = select_validation_monitor_subset(
+            X_val,
+            y_val,
+            validation_monitor_max_windows,
+        )
+        predict_batch_size = inference_batch_size(batch_size)
+        if X_val_monitor.shape[0] != X_val.shape[0]:
+            print(
+                f"  Val monitor subset: {X_val_monitor.shape[0]:,}"
+                f" / {X_val.shape[0]:,} windows"
+            )
 
         model = build_mm256_model(
             variant=model_variant,
@@ -197,11 +214,12 @@ def run_mm256_learning_curves(
             y_train,
             epochs=epochs,
             batch_size=batch_size,
-            validation_data=(X_val, y_val),
+            validation_data=(X_val_monitor, y_val_monitor),
+            validation_batch_size=predict_batch_size,
             callbacks=[early_stop],
-            verbose=1,
+            verbose=2,
         )
-        y_pred = model.predict(X_val, batch_size=batch_size)
+        y_pred = model.predict(X_val, batch_size=predict_batch_size, verbose=0)
         y_baseline = build_last_input_baseline(X_val, target_feature_idx, y_val.shape[1])
 
         model_metrics = compute_mm256_metrics(y_val, y_pred)
@@ -212,6 +230,7 @@ def run_mm256_learning_curves(
             "n_val_rows": int(len(val_df)),
             "n_train_windows": int(X_train.shape[0]),
             "n_val_windows": int(X_val.shape[0]),
+            "n_val_monitor_windows": int(X_val_monitor.shape[0]),
             "trained_epochs": len(history.history["loss"]),
             "best_epoch": int(np.argmin(history.history["val_loss"]) + 1),
             "min_train_loss": float(np.min(history.history["loss"])),
@@ -300,8 +319,9 @@ def main():
     parser.add_argument("--window-length", type=int, default=300)
     parser.add_argument("--forecast-horizon", type=int, default=120)
     parser.add_argument("--epochs", type=int, default=40)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--validation-monitor-max-windows", type=int, default=8192)
     parser.add_argument("--model-variant", choices=["simple", "advanced"], default="advanced")
     args = parser.parse_args()
 
@@ -318,6 +338,7 @@ def main():
         batch_size=args.batch_size,
         patience=args.patience,
         model_variant=args.model_variant,
+        validation_monitor_max_windows=args.validation_monitor_max_windows,
     )
 
 
