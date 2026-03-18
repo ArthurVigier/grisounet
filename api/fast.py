@@ -1,3 +1,7 @@
+import json
+import pickle
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from ml_logic.model_save import load_model_from_gcs
@@ -8,6 +12,7 @@ from pydantic import BaseModel
 from typing import List, Any, Optional
 
 app = FastAPI()
+MODELS_DIR = Path("results/models")
 
 app.add_middleware(
     CORSMiddleware,
@@ -62,10 +67,28 @@ def _get_mm256_preprocessed():
 
 
 def _get_mm256_model(timestamp: str):
-    """Load MM256 model from GCS (model name prefixed with mm256_)."""
+    """Load MM256 model and local inference artifacts for one saved timestamp."""
     key = f"mm256_{timestamp}"
     if key not in _cached_mm256_models:
-        _cached_mm256_models[key] = load_model_from_gcs(f"mm256_{timestamp}")
+        model_timestamp = f"mm256_{timestamp}"
+        metadata_path = MODELS_DIR / f"model_{model_timestamp}_metadata.json"
+        scalers_path = MODELS_DIR / f"model_{model_timestamp}_scalers.pkl"
+        model = load_model_from_gcs(model_timestamp)
+
+        metadata = {}
+        scalers = {}
+        if metadata_path.exists():
+            with open(metadata_path, "r", encoding="utf-8") as stream:
+                metadata = json.load(stream)
+        if scalers_path.exists():
+            with open(scalers_path, "rb") as stream:
+                scalers = pickle.load(stream)
+
+        _cached_mm256_models[key] = {
+            "model": model,
+            "metadata": metadata,
+            "scalers": scalers,
+        }
     return _cached_mm256_models[key]
 
 
@@ -142,13 +165,34 @@ def predict_mm256(data: PredictMM256Request):
         prediction : list — predicted MM256 values, shape (n_samples, horizon, 1)
         sensor : "MM256"
     """
-    model = _get_mm256_model(data.timestamp)
+    bundle = _get_mm256_model(data.timestamp)
+    model = bundle["model"]
 
     if model is None:
         raise HTTPException(status_code=404, detail="MM256 model not found")
 
     X_pred = np.array(data.X_pred, dtype=np.float32)
-    prediction = model.predict(X_pred)
+    metadata = bundle.get("metadata", {})
+    scalers = bundle.get("scalers", {})
+    catch22_meta = metadata.get("catch22", {})
+    expects_catch22 = bool(catch22_meta.get("enabled")) or len(getattr(model, "inputs", [])) > 1
+
+    if expects_catch22:
+        from scripts.preprocessor_MM256 import build_mm256_model_inputs, transform_catch22_windows
+
+        catch22_scalers = scalers.get("catch22_feature_scalers")
+        if catch22_scalers is None:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Model expects catch22 inputs but the saved catch22 scalers "
+                    "are missing locally"
+                ),
+            )
+        X_pred_c22 = transform_catch22_windows(X_pred, catch22_scalers)
+        prediction = model.predict(build_mm256_model_inputs(X_pred, X_pred_c22))
+    else:
+        prediction = model.predict(X_pred)
 
     return {
         "sensor": "MM256",
@@ -163,7 +207,11 @@ def predict_mm256_info():
         "sensor": "MM256",
         "input_shape": "(n_samples, 180, n_features)",
         "output_shape": "(n_samples, 120, 1)",
-        "note": "Input length = window_length - forecast_horizon = 300 - 120 = 180 seconds",
+        "note": (
+            "Input length = window_length - forecast_horizon = 300 - 120 = 180 seconds. "
+            "If the saved model was trained with catch22, the API derives the static catch22 "
+            "branch internally from the provided sequence windows."
+        ),
     }
 
 

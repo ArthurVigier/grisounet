@@ -35,8 +35,10 @@ from scripts.cv_time_series import build_last_input_baseline, compute_mm256_metr
 from scripts.preprocessor_MM256 import (
     TARGET_SENSOR,
     build_window_index_mm256,
+    build_mm256_model_inputs,
     preprocess_mm256,
     slice_windows_mm256,
+    transform_catch22_windows,
 )
 
 
@@ -85,7 +87,8 @@ def _split_temporal_holdout(data: pd.DataFrame, train_ratio: float) -> tuple[pd.
 
 def _apply_saved_scalers(df: pd.DataFrame, scalers: dict) -> pd.DataFrame:
     out = df.copy()
-    for col, scaler in scalers.items():
+    raw_scalers = scalers.get("raw_feature_scalers", scalers)
+    for col, scaler in raw_scalers.items():
         if col in out.columns:
             out[col] = scaler.transform(out[[col]]).astype(np.float32)
     return out
@@ -170,6 +173,14 @@ def load_mm256_prediction_bundle(
         window_length,
         forecast_horizon,
     )
+    catch22_meta = metadata.get("catch22", {})
+    catch22_scalers = scalers.get("catch22_feature_scalers")
+    if catch22_meta.get("enabled"):
+        if catch22_scalers is None:
+            raise ValueError("Saved model metadata expects catch22 features but no catch22 scalers were found")
+        X_test_c22 = transform_catch22_windows(X_test, catch22_scalers)
+    else:
+        X_test_c22 = None
     window_index = build_window_index_mm256(
         scaled_test,
         0,
@@ -184,9 +195,11 @@ def load_mm256_prediction_bundle(
     target_feature_idx = feature_cols.index(TARGET_SENSOR)
 
     model = load_model(model_path, compile=False)
-    y_pred = model.predict(X_test, verbose=0)
+    model_inputs = build_mm256_model_inputs(X_test, X_test_c22)
+    y_pred = model.predict(model_inputs, verbose=0)
     y_baseline = build_last_input_baseline(X_test, target_feature_idx, y_test.shape[1])
-    target_scaler = scalers[TARGET_SENSOR]
+    raw_scalers = scalers.get("raw_feature_scalers", scalers)
+    target_scaler = raw_scalers[TARGET_SENSOR]
     detail_df = _build_detailed_prediction_df(window_index, y_test, y_pred, y_baseline, target_scaler)
 
     return {

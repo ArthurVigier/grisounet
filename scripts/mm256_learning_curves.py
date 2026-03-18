@@ -32,6 +32,7 @@ from scripts.cv_time_series import (
     select_validation_monitor_subset,
 )
 from scripts.preprocessor_MM256 import TARGET_SENSOR, preprocess_mm256, scale_fold, slice_windows_mm256
+from scripts.preprocessor_MM256 import build_mm256_model_inputs, fit_transform_catch22_windows
 
 
 def _parse_train_fractions(raw: str) -> list[float]:
@@ -127,6 +128,7 @@ def run_mm256_learning_curves(
     patience: int = 5,
     model_variant: str = "advanced",
     validation_monitor_max_windows: int | None = 8192,
+    use_catch22: bool = True,
 ) -> dict:
     import tensorflow as tf
 
@@ -176,6 +178,8 @@ def run_mm256_learning_curves(
             window_length,
             forecast_horizon,
         )
+        X_train_c22 = None
+        X_val_c22 = None
         print(f"  X_train: {X_train.shape}, y_train: {y_train.shape}")
         print(f"  X_val:   {X_val.shape}, y_val:   {y_val.shape}")
 
@@ -185,17 +189,30 @@ def run_mm256_learning_curves(
 
         feature_cols = [col for col in scaled_val.columns if col != "ALERT"]
         target_feature_idx = feature_cols.index(TARGET_SENSOR)
-        X_val_monitor, y_val_monitor = select_validation_monitor_subset(
+        X_val_monitor_seq, y_val_monitor = select_validation_monitor_subset(
             X_val,
             y_val,
             validation_monitor_max_windows,
         )
         predict_batch_size = inference_batch_size(batch_size)
-        if X_val_monitor.shape[0] != X_val.shape[0]:
+        if X_val_monitor_seq.shape[0] != X_val.shape[0]:
             print(
-                f"  Val monitor subset: {X_val_monitor.shape[0]:,}"
+                f"  Val monitor subset: {X_val_monitor_seq.shape[0]:,}"
                 f" / {X_val.shape[0]:,} windows"
             )
+
+        if use_catch22:
+            X_train_c22, X_val_c22, _, catch22_meta = fit_transform_catch22_windows(
+                X_train,
+                X_val,
+            )
+            X_val_monitor_c22 = X_val_c22[-X_val_monitor_seq.shape[0]:]
+            print(
+                f"  Catch22 static features: {X_train_c22.shape[1]}"
+                f" (base sequence features: {catch22_meta['n_base_sequence_features']})"
+            )
+        else:
+            X_val_monitor_c22 = None
 
         model = build_mm256_model(
             variant=model_variant,
@@ -203,23 +220,27 @@ def run_mm256_learning_curves(
             n_features=X_train.shape[2],
             forecast_horizon=y_train.shape[1],
             n_targets=y_train.shape[2],
+            n_static_features=0 if X_train_c22 is None else X_train_c22.shape[1],
         )
+        train_inputs = build_mm256_model_inputs(X_train, X_train_c22)
+        val_inputs = build_mm256_model_inputs(X_val, X_val_c22)
+        val_monitor_inputs = build_mm256_model_inputs(X_val_monitor_seq, X_val_monitor_c22)
         early_stop = tf.keras.callbacks.EarlyStopping(
             monitor="val_loss",
             patience=patience,
             restore_best_weights=True,
         )
         history = model.fit(
-            X_train,
+            train_inputs,
             y_train,
             epochs=epochs,
             batch_size=batch_size,
-            validation_data=(X_val_monitor, y_val_monitor),
+            validation_data=(val_monitor_inputs, y_val_monitor),
             validation_batch_size=predict_batch_size,
             callbacks=[early_stop],
             verbose=2,
         )
-        y_pred = model.predict(X_val, batch_size=predict_batch_size, verbose=0)
+        y_pred = model.predict(val_inputs, batch_size=predict_batch_size, verbose=0)
         y_baseline = build_last_input_baseline(X_val, target_feature_idx, y_val.shape[1])
 
         model_metrics = compute_mm256_metrics(y_val, y_pred)
@@ -230,7 +251,9 @@ def run_mm256_learning_curves(
             "n_val_rows": int(len(val_df)),
             "n_train_windows": int(X_train.shape[0]),
             "n_val_windows": int(X_val.shape[0]),
-            "n_val_monitor_windows": int(X_val_monitor.shape[0]),
+            "n_val_monitor_windows": int(X_val_monitor_seq.shape[0]),
+            "use_catch22": bool(use_catch22),
+            "n_catch22_features": int(0 if X_train_c22 is None else X_train_c22.shape[1]),
             "trained_epochs": len(history.history["loss"]),
             "best_epoch": int(np.argmin(history.history["val_loss"]) + 1),
             "min_train_loss": float(np.min(history.history["loss"])),
@@ -260,6 +283,8 @@ def run_mm256_learning_curves(
         )
 
         del model, X_train, y_train, X_val, y_val, y_pred, y_baseline, scaled_train, scaled_val
+        del X_train_c22, X_val_c22, X_val_monitor_seq, X_val_monitor_c22
+        del train_inputs, val_inputs, val_monitor_inputs
         tf.keras.backend.clear_session()
         gc.collect()
 
@@ -283,6 +308,7 @@ def run_mm256_learning_curves(
     summary = {
         "timestamp": timestamp,
         "model_variant": model_variant,
+        "use_catch22": bool(use_catch22),
         "train_fractions": train_fractions,
         "train_period": f"{train_pool_df.index.min()} -> {train_pool_df.index.max()}",
         "validation_period": f"{val_df.index.min()} -> {val_df.index.max()}",
@@ -323,6 +349,9 @@ def main():
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--validation-monitor-max-windows", type=int, default=8192)
     parser.add_argument("--model-variant", choices=["simple", "advanced"], default="advanced")
+    parser.add_argument("--use-catch22", dest="use_catch22", action="store_true")
+    parser.add_argument("--disable-catch22", dest="use_catch22", action="store_false")
+    parser.set_defaults(use_catch22=True)
     args = parser.parse_args()
 
     run_mm256_learning_curves(
@@ -339,6 +368,7 @@ def main():
         patience=args.patience,
         model_variant=args.model_variant,
         validation_monitor_max_windows=args.validation_monitor_max_windows,
+        use_catch22=args.use_catch22,
     )
 
 

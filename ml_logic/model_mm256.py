@@ -41,18 +41,28 @@ def build_simple_lstm_mm256(
     n_targets: int = 1,
     units: int = 64,
     quantile: float = 0.9,
+    n_static_features: int = 0,
 ):
     """Build the simple encoder-decoder LSTM used as the model baseline."""
-    from tensorflow.keras.layers import Dense, Input, LSTM, RepeatVector, TimeDistributed
-    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import Concatenate, Dense, Input, LSTM, RepeatVector, TimeDistributed
+    from tensorflow.keras.models import Model
 
-    model = Sequential([
-        Input(shape=(input_length, n_features)),
-        LSTM(units, return_sequences=False),
-        RepeatVector(forecast_horizon),
-        LSTM(units, return_sequences=True),
-        TimeDistributed(Dense(n_targets)),
-    ])
+    sequence_input = Input(shape=(input_length, n_features), name="sequence_input")
+    encoded = LSTM(units, return_sequences=False)(sequence_input)
+
+    model_inputs = [sequence_input]
+    context = encoded
+    if n_static_features > 0:
+        catch22_input = Input(shape=(n_static_features,), name="catch22_input")
+        catch22_context = Dense(max(16, units // 2), activation="relu")(catch22_input)
+        context = Concatenate()([encoded, catch22_context])
+        model_inputs.append(catch22_input)
+
+    repeated = RepeatVector(forecast_horizon)(context)
+    decoded = LSTM(units, return_sequences=True)(repeated)
+    outputs = TimeDistributed(Dense(n_targets))(decoded)
+
+    model = Model(inputs=model_inputs if len(model_inputs) > 1 else sequence_input, outputs=outputs)
     model.compile(
         optimizer="adam",
         loss=PinballLoss(quantile=quantile),
@@ -67,19 +77,29 @@ def build_advanced_lstm_mm256(
     n_targets: int = 1,
     units: int = 64,
     quantile: float = 0.9,
+    n_static_features: int = 0,
 ):
     """Build the deeper encoder-decoder LSTM used for the MM256 candidate model."""
-    from tensorflow.keras.layers import Dense, Input, LSTM, RepeatVector, TimeDistributed
-    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import Concatenate, Dense, Input, LSTM, RepeatVector, TimeDistributed
+    from tensorflow.keras.models import Model
 
-    model = Sequential([
-        Input(shape=(input_length, n_features)),
-        LSTM(units, return_sequences=True),
-        LSTM(units, return_sequences=False),
-        RepeatVector(forecast_horizon),
-        LSTM(units, return_sequences=True),
-        TimeDistributed(Dense(n_targets)),
-    ])
+    sequence_input = Input(shape=(input_length, n_features), name="sequence_input")
+    encoded = LSTM(units, return_sequences=True)(sequence_input)
+    encoded = LSTM(units, return_sequences=False)(encoded)
+
+    model_inputs = [sequence_input]
+    context = encoded
+    if n_static_features > 0:
+        catch22_input = Input(shape=(n_static_features,), name="catch22_input")
+        catch22_context = Dense(max(16, units // 2), activation="relu")(catch22_input)
+        context = Concatenate()([encoded, catch22_context])
+        model_inputs.append(catch22_input)
+
+    repeated = RepeatVector(forecast_horizon)(context)
+    decoded = LSTM(units, return_sequences=True)(repeated)
+    outputs = TimeDistributed(Dense(n_targets))(decoded)
+
+    model = Model(inputs=model_inputs if len(model_inputs) > 1 else sequence_input, outputs=outputs)
     model.compile(
         optimizer="adam",
         loss=PinballLoss(quantile=quantile),
@@ -95,6 +115,7 @@ def build_mm256_model(
     n_targets: int = 1,
     units: int = 64,
     quantile: float = 0.9,
+    n_static_features: int = 0,
 ):
     """Build one of the supported MM256 architectures."""
     builders = {
@@ -111,14 +132,15 @@ def build_mm256_model(
         n_targets=n_targets,
         units=units,
         quantile=quantile,
+        n_static_features=n_static_features,
     )
 
 
 def _fit_mm256_model(
     model,
-    X_train: np.ndarray,
+    X_train,
     y_train: np.ndarray,
-    X_val: np.ndarray | None = None,
+    X_val=None,
     y_val: np.ndarray | None = None,
     epochs: int = 40,
     batch_size: int = 32,
@@ -135,7 +157,7 @@ def _fit_mm256_model(
         "batch_size": batch_size,
         "callbacks": [early_stop],
     }
-    if X_val is not None and X_val.shape[0] > 0:
+    if X_val is not None and y_val is not None:
         fit_kwargs["validation_data"] = (X_val, y_val)
     else:
         fit_kwargs["validation_split"] = 0.2
@@ -143,22 +165,23 @@ def _fit_mm256_model(
     history = model.fit(X_train, y_train, **fit_kwargs)
 
     y_pred = None
-    if X_val is not None and X_val.shape[0] > 0:
+    if X_val is not None and y_val is not None:
         y_pred = model.predict(X_val, batch_size=batch_size)
 
     return history, y_pred
 
 
 def simple_lstm_mm256(
-    X_train: np.ndarray,
+    X_train,
     y_train: np.ndarray,
-    X_val: np.ndarray | None = None,
+    X_val=None,
     y_val: np.ndarray | None = None,
     units: int = 64,
     epochs: int = 40,
     batch_size: int = 32,
     patience: int = 5,
     quantile: float = 0.9,
+    n_static_features: int = 0,
 ) -> tuple:
     """Train the simple MM256 LSTM model."""
     model = build_simple_lstm_mm256(
@@ -168,6 +191,7 @@ def simple_lstm_mm256(
         n_targets=y_train.shape[2] if y_train.ndim == 3 else 1,
         units=units,
         quantile=quantile,
+        n_static_features=n_static_features,
     )
     history, y_pred = _fit_mm256_model(
         model,
@@ -183,15 +207,16 @@ def simple_lstm_mm256(
 
 
 def advanced_lstm_mm256(
-    X_train: np.ndarray,
+    X_train,
     y_train: np.ndarray,
-    X_val: np.ndarray | None = None,
+    X_val=None,
     y_val: np.ndarray | None = None,
     units: int = 64,
     epochs: int = 40,
     batch_size: int = 32,
     patience: int = 5,
     quantile: float = 0.9,
+    n_static_features: int = 0,
 ) -> tuple:
     """Train the advanced MM256 LSTM model."""
     model = build_advanced_lstm_mm256(
@@ -201,6 +226,7 @@ def advanced_lstm_mm256(
         n_targets=y_train.shape[2] if y_train.ndim == 3 else 1,
         units=units,
         quantile=quantile,
+        n_static_features=n_static_features,
     )
     history, y_pred = _fit_mm256_model(
         model,

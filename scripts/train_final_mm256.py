@@ -20,7 +20,13 @@ from ml_logic.model_mm256 import build_mm256_model
 from ml_logic.model_save import save_model_artifacts_to_gcs, save_model_to_gcs
 from ml_logic.results_bq_save import save_history_to_bq, save_predictions_to_bq
 from scripts.cv_time_series import build_last_input_baseline, compute_mm256_metrics, inference_batch_size
-from scripts.preprocessor_MM256 import TARGET_SENSOR, scale_fold, slice_windows_mm256
+from scripts.preprocessor_MM256 import (
+    TARGET_SENSOR,
+    build_mm256_model_inputs,
+    fit_transform_catch22_windows,
+    scale_fold,
+    slice_windows_mm256,
+)
 
 
 def _build_prediction_df(y_true: np.ndarray, y_pred: np.ndarray, timestamp: str, table_suffix: str) -> pd.DataFrame:
@@ -76,6 +82,7 @@ def train_final_mm256(
     save_preprocess: bool = False,
     upload_preprocess: bool = False,
     save_analysis_outputs: bool = False,
+    use_catch22: bool = True,
 ) -> dict:
     """Train on the full train split and evaluate once on the holdout test split."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -101,6 +108,8 @@ def train_final_mm256(
         window_length,
         forecast_horizon,
     )
+    X_train_c22 = None
+    X_test_c22 = None
 
     print(f"  X_train: {X_train.shape}, y_train: {y_train.shape}")
     print(f"  X_test:  {X_test.shape},  y_test:  {y_test.shape}")
@@ -109,6 +118,18 @@ def train_final_mm256(
         return {"error": "no_training_windows"}
     if X_test.shape[0] == 0:
         return {"error": "no_test_windows"}
+
+    catch22_scalers = None
+    catch22_meta = {"enabled": False, "n_catch22_features": 0}
+    if use_catch22:
+        X_train_c22, X_test_c22, catch22_scalers, catch22_meta = fit_transform_catch22_windows(
+            X_train,
+            X_test,
+        )
+        print(
+            f"  Catch22 static features: {X_train_c22.shape[1]}"
+            f" (base sequence features: {catch22_meta['n_base_sequence_features']})"
+        )
 
     if save_preprocess:
         save_preprocessing_artifact(
@@ -129,16 +150,19 @@ def train_final_mm256(
         n_features=X_train.shape[2],
         forecast_horizon=y_train.shape[1],
         n_targets=y_train.shape[2],
+        n_static_features=0 if X_train_c22 is None else X_train_c22.shape[1],
     )
+    train_inputs = build_mm256_model_inputs(X_train, X_train_c22)
+    test_inputs = build_mm256_model_inputs(X_test, X_test_c22)
     history = model.fit(
-        X_train,
+        train_inputs,
         y_train,
         epochs=recommended_epochs,
         batch_size=batch_size,
         verbose=2,
     )
     predict_batch_size = inference_batch_size(batch_size)
-    y_pred = model.predict(X_test, batch_size=predict_batch_size, verbose=0)
+    y_pred = model.predict(test_inputs, batch_size=predict_batch_size, verbose=0)
     y_baseline = build_last_input_baseline(X_test, target_feature_idx, y_test.shape[1])
 
     model_metrics = compute_mm256_metrics(y_test, y_pred)
@@ -165,8 +189,17 @@ def train_final_mm256(
         "n_train_windows": int(X_train.shape[0]),
         "n_test_windows": int(X_test.shape[0]),
         "feature_columns": feature_cols,
+        "catch22": catch22_meta,
     }
-    artifact_paths = save_model_artifacts_to_gcs(model_timestamp, scalers=scalers, metadata=metadata)
+    scaler_bundle = {
+        "raw_feature_scalers": scalers,
+        "catch22_feature_scalers": catch22_scalers,
+    }
+    artifact_paths = save_model_artifacts_to_gcs(
+        model_timestamp,
+        scalers=scaler_bundle,
+        metadata=metadata,
+    )
 
     pred_df = None
     if push_bq:
@@ -214,6 +247,8 @@ def train_final_mm256(
         "model_variant": model_variant,
         "recommended_epochs": int(recommended_epochs),
         "model_timestamp": model_timestamp,
+        "use_catch22": bool(catch22_meta["enabled"]),
+        "n_catch22_features": int(catch22_meta["n_catch22_features"]),
     }
     os.makedirs("results/final_metrics", exist_ok=True)
     metrics_path = f"results/final_metrics/mm256_final_{timestamp}.json"

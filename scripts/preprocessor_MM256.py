@@ -53,6 +53,9 @@ SENSORS_TO_DROP = ["MM263", "MM264", "MM252", "MM261", "MM262", "MM211"]
 # Motor current columns that will be replaced by a single average.
 AMP_COLS = ["AMP1_IR", "AMP2_IR", "DMP3_IR", "DMP4_IR", "AMP5_IR"]
 
+SEQUENCE_INPUT_NAME = "sequence_input"
+CATCH22_INPUT_NAME = "catch22_input"
+
 
 # ---------------------------------------------------------------------------
 # 1. Identify "active days" — days where MM256 >= concentration_threshold
@@ -344,6 +347,131 @@ def slice_windows_mm256(
     gc.collect()
 
     return X_arr, y_arr
+
+
+def _get_catch22_transformer():
+    """Instantiate aeon's Catch22 transformer with a clear dependency error."""
+    try:
+        from aeon.transformations.collection.feature_based import Catch22
+    except ImportError as exc:
+        raise ImportError(
+            "Catch22 feature engineering requires aeon. "
+            "Install aeon==1.3.0 before running the MM256 catch22 pipeline."
+        ) from exc
+
+    return Catch22(replace_nans=True)
+
+
+def _to_catch22_collection(X: np.ndarray) -> np.ndarray:
+    """Convert (samples, timesteps, features) to aeon's collection axis order."""
+    if X.ndim != 3:
+        raise ValueError("Expected a 3D window tensor shaped (samples, timesteps, features)")
+    return np.swapaxes(np.asarray(X, dtype=np.float32), 1, 2)
+
+
+def _fit_feature_scalers(feature_matrix: np.ndarray) -> tuple[np.ndarray, dict[int, MinMaxScaler]]:
+    """Fit one MinMaxScaler per engineered feature column."""
+    if feature_matrix.ndim != 2:
+        raise ValueError("Expected a 2D feature matrix")
+
+    scaled = np.empty_like(feature_matrix, dtype=np.float32)
+    scalers: dict[int, MinMaxScaler] = {}
+
+    for feature_idx in range(feature_matrix.shape[1]):
+        scaler = MinMaxScaler()
+        scaled[:, [feature_idx]] = scaler.fit_transform(
+            feature_matrix[:, [feature_idx]]
+        ).astype(np.float32)
+        scalers[feature_idx] = scaler
+
+    return scaled, scalers
+
+
+def _apply_feature_scalers(feature_matrix: np.ndarray, scalers: dict[int, MinMaxScaler]) -> np.ndarray:
+    """Apply per-column scalers to a 2D engineered feature matrix."""
+    if feature_matrix.ndim != 2:
+        raise ValueError("Expected a 2D feature matrix")
+
+    scaled = np.empty_like(feature_matrix, dtype=np.float32)
+    for feature_idx in range(feature_matrix.shape[1]):
+        scaler = scalers[feature_idx]
+        scaled[:, [feature_idx]] = scaler.transform(
+            feature_matrix[:, [feature_idx]]
+        ).astype(np.float32)
+    return scaled
+
+
+def fit_transform_catch22_windows(
+    X_train: np.ndarray,
+    *extra_sets: np.ndarray,
+) -> tuple[np.ndarray, ...]:
+    """Fit catch22 on train windows and transform train plus any extra window sets.
+
+    The transformer expects collections shaped (samples, channels, timepoints),
+    while our pipeline stores windows as (samples, timesteps, features). The
+    axis swap happens here to avoid the orientation mistake present in the
+    original Charles-Henri sketch.
+    """
+    if X_train.shape[0] == 0:
+        raise ValueError("Cannot fit catch22 features on an empty training window set")
+
+    transformer = _get_catch22_transformer()
+    train_collection = _to_catch22_collection(X_train)
+    train_features = np.asarray(
+        transformer.fit_transform(train_collection),
+        dtype=np.float32,
+    )
+    train_features_scaled, catch22_scalers = _fit_feature_scalers(train_features)
+
+    outputs: list[np.ndarray] = [train_features_scaled]
+    for X_other in extra_sets:
+        if X_other.shape[0] == 0:
+            outputs.append(
+                np.empty((0, train_features_scaled.shape[1]), dtype=np.float32)
+            )
+            continue
+        other_collection = _to_catch22_collection(X_other)
+        other_features = np.asarray(
+            transformer.transform(other_collection),
+            dtype=np.float32,
+        )
+        outputs.append(_apply_feature_scalers(other_features, catch22_scalers))
+
+    metadata = {
+        "enabled": True,
+        "transformer": "aeon.Catch22",
+        "replace_nans": True,
+        "n_base_sequence_features": int(X_train.shape[2]),
+        "n_catch22_features": int(train_features_scaled.shape[1]),
+    }
+    return (*outputs, catch22_scalers, metadata)
+
+
+def transform_catch22_windows(
+    X: np.ndarray,
+    catch22_scalers: dict[int, MinMaxScaler],
+) -> np.ndarray:
+    """Transform new windows into scaled catch22 descriptors using saved scalers."""
+    if X.shape[0] == 0:
+        return np.empty((0, len(catch22_scalers)), dtype=np.float32)
+
+    transformer = _get_catch22_transformer()
+    collection = _to_catch22_collection(X)
+    features = np.asarray(transformer.fit_transform(collection), dtype=np.float32)
+    return _apply_feature_scalers(features, catch22_scalers)
+
+
+def build_mm256_model_inputs(
+    X_sequence: np.ndarray,
+    X_catch22: np.ndarray | None = None,
+):
+    """Return the model input payload expected by the MM256 architectures."""
+    if X_catch22 is None:
+        return X_sequence
+    return {
+        SEQUENCE_INPUT_NAME: X_sequence,
+        CATCH22_INPUT_NAME: X_catch22,
+    }
 
 
 def build_window_index_mm256(

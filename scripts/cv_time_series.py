@@ -19,7 +19,14 @@ if PROJECT_ROOT not in sys.path:
 
 from ml_logic.model_mm256 import build_mm256_model
 from ml_logic.secrets import get_secret
-from scripts.preprocessor_MM256 import TARGET_SENSOR, preprocess_mm256, scale_fold, slice_windows_mm256
+from scripts.preprocessor_MM256 import (
+    TARGET_SENSOR,
+    build_mm256_model_inputs,
+    fit_transform_catch22_windows,
+    preprocess_mm256,
+    scale_fold,
+    slice_windows_mm256,
+)
 
 
 METRIC_KEYS = ("MAE", "RMSE", "MAPE_%", "pinball_90")
@@ -211,6 +218,7 @@ def run_cv_mm256(
     push_bq: bool = False,
     validation_monitor_max_windows: int | None = 8192,
     save_plots: bool = False,
+    use_catch22: bool = True,
 ) -> dict:
     """Run cross-validation on a pre-split MM256 training dataframe."""
     import tensorflow as tf
@@ -258,10 +266,12 @@ def run_cv_mm256(
             window_length,
             forecast_horizon,
         )
+        X_train_c22 = None
+        X_val_c22 = None
 
         feature_cols = [col for col in scaled_val.columns if col != "ALERT"]
         target_feature_idx = feature_cols.index(TARGET_SENSOR)
-        X_val_monitor, y_val_monitor = select_validation_monitor_subset(
+        X_val_monitor_seq, y_val_monitor = select_validation_monitor_subset(
             X_val,
             y_val,
             validation_monitor_max_windows,
@@ -270,9 +280,9 @@ def run_cv_mm256(
 
         print(f"  X_train: {X_train.shape}, y_train: {y_train.shape}")
         print(f"  X_val:   {X_val.shape}, y_val:   {y_val.shape}")
-        if X_val_monitor.shape[0] != X_val.shape[0]:
+        if X_val_monitor_seq.shape[0] != X_val.shape[0]:
             print(
-                f"  Val monitor subset: {X_val_monitor.shape[0]:,}"
+                f"  Val monitor subset: {X_val_monitor_seq.shape[0]:,}"
                 f" / {X_val.shape[0]:,} windows"
             )
 
@@ -285,31 +295,48 @@ def run_cv_mm256(
             fold_metrics.append({"fold": fold_idx, "status": "skipped", "reason": "no_val_windows"})
             continue
 
+        if use_catch22:
+            X_train_c22, X_val_c22, _, catch22_meta = fit_transform_catch22_windows(
+                X_train,
+                X_val,
+            )
+            X_val_monitor_c22 = X_val_c22[-X_val_monitor_seq.shape[0]:]
+            print(
+                f"  Catch22 static features: {X_train_c22.shape[1]}"
+                f" (base sequence features: {catch22_meta['n_base_sequence_features']})"
+            )
+        else:
+            X_val_monitor_c22 = None
+
         model = build_mm256_model(
             variant=model_variant,
             input_length=X_train.shape[1],
             n_features=X_train.shape[2],
             forecast_horizon=y_train.shape[1],
             n_targets=y_train.shape[2],
+            n_static_features=0 if X_train_c22 is None else X_train_c22.shape[1],
         )
+        train_inputs = build_mm256_model_inputs(X_train, X_train_c22)
+        val_inputs = build_mm256_model_inputs(X_val, X_val_c22)
+        val_monitor_inputs = build_mm256_model_inputs(X_val_monitor_seq, X_val_monitor_c22)
         early_stop = tf.keras.callbacks.EarlyStopping(
             monitor="val_loss",
             patience=patience,
             restore_best_weights=True,
         )
         history = model.fit(
-            X_train,
+            train_inputs,
             y_train,
             epochs=epochs,
             batch_size=batch_size,
-            validation_data=(X_val_monitor, y_val_monitor),
+            validation_data=(val_monitor_inputs, y_val_monitor),
             validation_batch_size=predict_batch_size,
             callbacks=[early_stop],
             verbose=2,
         )
         fold_histories.append(history)
 
-        y_pred = model.predict(X_val, batch_size=predict_batch_size, verbose=0)
+        y_pred = model.predict(val_inputs, batch_size=predict_batch_size, verbose=0)
         y_baseline = build_last_input_baseline(X_val, target_feature_idx, y_val.shape[1])
         fold_horizon = pd.concat(
             [
@@ -329,7 +356,9 @@ def run_cv_mm256(
         metrics["status"] = "ok"
         metrics["n_train_windows"] = int(X_train.shape[0])
         metrics["n_val_windows"] = int(X_val.shape[0])
-        metrics["n_val_monitor_windows"] = int(X_val_monitor.shape[0])
+        metrics["n_val_monitor_windows"] = int(X_val_monitor_seq.shape[0])
+        metrics["use_catch22"] = bool(use_catch22)
+        metrics["n_catch22_features"] = int(0 if X_train_c22 is None else X_train_c22.shape[1])
         metrics["n_epochs_trained"] = len(history.history["loss"])
         metrics["best_epoch"] = int(np.argmin(history.history["val_loss"]) + 1)
         metrics["best_val_loss"] = float(np.min(history.history["val_loss"]))
@@ -377,11 +406,17 @@ def run_cv_mm256(
 
         print(f"  Fold {fold_idx} done in {perf_counter() - fold_t:.1f}s\n")
         del model, X_train, y_train, X_val, y_val, y_pred, y_baseline, scaled_train, scaled_val
+        del X_train_c22, X_val_c22, X_val_monitor_seq, X_val_monitor_c22
+        del train_inputs, val_inputs, val_monitor_inputs
         tf.keras.backend.clear_session()
         gc.collect()
 
     ok_folds = [metric for metric in fold_metrics if metric.get("status") == "ok"]
     agg = _aggregate_cv_metrics(ok_folds, n_splits)
+    agg["use_catch22"] = bool(use_catch22)
+    agg["n_catch22_features"] = int(
+        max((metric.get("n_catch22_features", 0) for metric in ok_folds), default=0)
+    )
 
     print(f"{'='*60}")
     print(f"  CV Summary — {len(ok_folds)}/{n_splits} folds completed")
@@ -465,6 +500,7 @@ def run_cv_mm256(
         "recommended_epochs": agg.get("recommended_epochs", epochs),
         "n_splits": n_splits,
         "model_variant": model_variant,
+        "use_catch22": bool(use_catch22),
         "metrics_path": metrics_path,
         "aggregate_path": agg_path,
         "horizon_metrics_path": horizon_metrics_path,
@@ -513,6 +549,9 @@ def main():
     parser.add_argument("--model-variant", choices=["simple", "advanced"], default="advanced")
     parser.add_argument("--push-bq", action="store_true")
     parser.add_argument("--save-plots", action="store_true")
+    parser.add_argument("--use-catch22", dest="use_catch22", action="store_true")
+    parser.add_argument("--disable-catch22", dest="use_catch22", action="store_false")
+    parser.set_defaults(use_catch22=True)
     args = parser.parse_args()
 
     data, _, _ = preprocess_mm256(
@@ -538,6 +577,7 @@ def main():
         push_bq=args.push_bq,
         validation_monitor_max_windows=args.validation_monitor_max_windows,
         save_plots=args.save_plots,
+        use_catch22=args.use_catch22,
     )
 
 
