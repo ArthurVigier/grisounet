@@ -54,6 +54,9 @@ def run_pipeline_mm256(
     cache_raw: bool = False,
     alert_rate: float = 1.0,
     concentration_threshold: float = 1.0,
+    clean_abnormal_values: bool = True,
+    frozen_sensor_window: int = 3600,
+    sensor_disagreement_z_threshold: float = 6.0,
     train_ratio: float = 0.7,
     n_splits: int = 5,
     gap: int = 300,
@@ -89,6 +92,9 @@ def run_pipeline_mm256(
         alert_rate=alert_rate,
         concentration_threshold=concentration_threshold,
         scale=False,
+        clean_abnormal_values=clean_abnormal_values,
+        frozen_sensor_window=frozen_sensor_window,
+        sensor_disagreement_z_threshold=sensor_disagreement_z_threshold,
     )
     print(f"  Done in {_fmt(perf_counter() - step_t)}")
 
@@ -177,6 +183,9 @@ def run_cv_pipeline_mm256(
     cache_raw: bool = False,
     alert_rate: float = 1.0,
     concentration_threshold: float = 1.0,
+    clean_abnormal_values: bool = True,
+    frozen_sensor_window: int = 3600,
+    sensor_disagreement_z_threshold: float = 6.0,
     train_ratio: float = 0.7,
     n_splits: int = 5,
     gap: int = 300,
@@ -199,6 +208,9 @@ def run_cv_pipeline_mm256(
         alert_rate=alert_rate,
         concentration_threshold=concentration_threshold,
         scale=False,
+        clean_abnormal_values=clean_abnormal_values,
+        frozen_sensor_window=frozen_sensor_window,
+        sensor_disagreement_z_threshold=sensor_disagreement_z_threshold,
     )
     train_df, _ = split_temporal_holdout(data, train_ratio=train_ratio)
     return run_cv_mm256(
@@ -226,6 +238,10 @@ def main():
     parser.add_argument("--cache-raw", action="store_true")
     parser.add_argument("--alert-rate", type=float, default=1.0)
     parser.add_argument("--concentration-threshold", type=float, default=1.0)
+    parser.add_argument("--skip-cleaning", dest="clean_abnormal_values", action="store_false")
+    parser.add_argument("--frozen-sensor-window", type=int, default=3600)
+    parser.add_argument("--sensor-disagreement-z-threshold", type=float, default=6.0)
+    parser.set_defaults(clean_abnormal_values=True)
     parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--gap", type=int, default=300)
@@ -256,6 +272,9 @@ def main():
             cache_raw=args.cache_raw,
             alert_rate=args.alert_rate,
             concentration_threshold=args.concentration_threshold,
+            clean_abnormal_values=args.clean_abnormal_values,
+            frozen_sensor_window=args.frozen_sensor_window,
+            sensor_disagreement_z_threshold=args.sensor_disagreement_z_threshold,
             train_ratio=args.train_ratio,
             n_splits=args.n_splits,
             gap=args.gap,
@@ -278,6 +297,9 @@ def main():
         cache_raw=args.cache_raw,
         alert_rate=args.alert_rate,
         concentration_threshold=args.concentration_threshold,
+        clean_abnormal_values=args.clean_abnormal_values,
+        frozen_sensor_window=args.frozen_sensor_window,
+        sensor_disagreement_z_threshold=args.sensor_disagreement_z_threshold,
         train_ratio=args.train_ratio,
         n_splits=args.n_splits,
         gap=args.gap,

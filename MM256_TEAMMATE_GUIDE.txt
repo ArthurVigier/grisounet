@@ -66,13 +66,17 @@ Most important MM256 files
 How the MM256 workflow works
 ----------------------------
 1. Load the modeling table.
-2. Keep only days where MM256 is active.
-3. Build MM256 windows.
-4. Optionally compute catch22 features from each window.
-5. Run time-series CV.
-6. Train a final model on the train split.
-7. Evaluate on the holdout split.
-8. Save metrics, plots, model artifacts, and optionally upload predictions to
+2. Run anomaly cleaning before MM256 preprocessing.
+   Current defaults:
+   - frozen sensor detection: 3600 seconds (60 min)
+   - co-located sensor disagreement threshold: 6 standard deviations
+3. Keep only days where MM256 is active.
+4. Build MM256 windows.
+5. Optionally compute catch22 features from each window.
+6. Run time-series CV.
+7. Train a final model on the train split.
+8. Evaluate on the holdout split.
+9. Save metrics, plots, model artifacts, and optionally upload predictions to
    BigQuery.
 
 
@@ -95,6 +99,9 @@ Useful variants:
 
 - Full run with BigQuery upload:
   python interface/workflow_mm256.py --mode full --source cache --push-bq
+
+- Full run with explicit cleaning thresholds:
+  python interface/workflow_mm256.py --mode full --source cache --frozen-sensor-window 3600 --sensor-disagreement-z-threshold 6.0
 
 - CV only:
   python interface/workflow_mm256.py --mode cv --source cache

@@ -90,13 +90,13 @@ def flag_out_of_range(
 def flag_frozen_sensors(
     df: pd.DataFrame,
     sensor_cols: Optional[list] = None,
-    window: int = 300,
+    window: int = 3600,
     threshold: float = 0.0,
 ) -> pd.DataFrame:
     """Flag periods where a sensor reports the exact same value for too long.
 
     A sensor stuck at a constant value for `window` consecutive seconds
-    (default 5 min) likely indicates a malfunction or communication loss.
+    (default 60 min) likely indicates a malfunction or communication loss.
 
     Parameters
     ----------
@@ -165,7 +165,7 @@ def flag_timestamp_gaps(
 def flag_sensor_disagreement(
     df: pd.DataFrame,
     groups: Optional[dict] = None,
-    z_threshold: float = 4.0,
+    z_threshold: float = 6.0,
 ) -> pd.DataFrame:
     """Flag rows where co-located sensors diverge abnormally.
 
@@ -219,9 +219,9 @@ def clean_dataframe(
     df: pd.DataFrame,
     drop: bool = False,
     bounds: Optional[dict] = None,
-    frozen_window: int = 300,
+    frozen_window: int = 3600,
     gap_seconds: int = 2,
-    z_threshold: float = 4.0,
+    z_threshold: float = 6.0,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """Run all anomaly detectors and optionally remove flagged rows.

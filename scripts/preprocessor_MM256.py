@@ -37,6 +37,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from ml_logic.data import load_modeling_dataframe
+from ml_logic.data_cleaning import clean_dataframe
 from ml_logic.secrets import get_secret
 
 # ---------------------------------------------------------------------------
@@ -123,6 +124,9 @@ def preprocess_mm256(
     alert_rate: float = 1.0,
     concentration_threshold: float = 1.0,
     scale: bool = True,
+    clean_abnormal_values: bool = True,
+    frozen_sensor_window: int = 3600,
+    sensor_disagreement_z_threshold: float = 6.0,
 ) -> tuple:
     """Load data, filter to active days, engineer features, and optionally scale.
 
@@ -143,6 +147,14 @@ def preprocess_mm256(
         If True, fit MinMaxScaler on the full filtered dataset.
         If False, return the unscaled dataframe so a downstream caller can
         fit scalers on train folds / train split only.
+    clean_abnormal_values : bool
+        If True, run anomaly cleaning before MM256-specific preprocessing and
+        drop rows flagged as abnormal.
+    frozen_sensor_window : int
+        Frozen-sensor detection horizon in seconds. Default is 3600 (60 min).
+    sensor_disagreement_z_threshold : float
+        Accepted z-score gap between co-located sensors before a disagreement
+        row is flagged and removed.
 
     Returns
     -------
@@ -175,6 +187,35 @@ def preprocess_mm256(
 
     total_rows = len(df)
     print(f"Total rows loaded: {total_rows:,}")
+
+    cleaning_meta = {
+        "applied": bool(clean_abnormal_values),
+        "frozen_sensor_window": int(frozen_sensor_window),
+        "sensor_disagreement_z_threshold": float(sensor_disagreement_z_threshold),
+        "rows_before_cleaning": int(total_rows),
+        "rows_after_cleaning": int(total_rows),
+        "rows_removed": 0,
+    }
+    if clean_abnormal_values:
+        print(
+            "Running anomaly cleaning before MM256 preprocessing"
+            f" (frozen_window={frozen_sensor_window}s,"
+            f" disagreement_z={sensor_disagreement_z_threshold})..."
+        )
+        df = clean_dataframe(
+            df,
+            drop=True,
+            frozen_window=frozen_sensor_window,
+            z_threshold=sensor_disagreement_z_threshold,
+            verbose=True,
+        )
+        cleaned_rows = len(df)
+        cleaning_meta["rows_after_cleaning"] = int(cleaned_rows)
+        cleaning_meta["rows_removed"] = int(total_rows - cleaned_rows)
+        print(
+            f"Rows after cleaning: {cleaned_rows:,}"
+            f" ({cleaned_rows / total_rows * 100:.1f}% kept)"
+        )
 
     # ---- Identify and filter to active days ----
     active_days = identify_active_days(df, concentration_threshold)
@@ -230,6 +271,7 @@ def preprocess_mm256(
         "n_active_rows": active_rows,
         "n_alert_rows": int(n_alert),
         "feature_columns": feature_cols,
+        "cleaning": cleaning_meta,
     }
 
     return df, scalers, metadata
@@ -648,6 +690,13 @@ def main():
                         help="Methane %% threshold for ALERT flag")
     parser.add_argument("--concentration-threshold", type=float, default=1.0,
                         help="Min daily peak MM256 %% to include a day")
+    parser.add_argument("--skip-cleaning", dest="clean_abnormal_values", action="store_false",
+                        help="Disable anomaly cleaning before MM256 preprocessing")
+    parser.add_argument("--frozen-sensor-window", type=int, default=3600,
+                        help="Frozen-sensor detection window in seconds (default: 3600)")
+    parser.add_argument("--sensor-disagreement-z-threshold", type=float, default=6.0,
+                        help="Accepted z-score gap between co-located sensors (default: 6.0)")
+    parser.set_defaults(clean_abnormal_values=True)
     parser.add_argument("--push-bq", action="store_true",
                         help="Push active-day summary to BigQuery")
     args = parser.parse_args()
@@ -658,6 +707,9 @@ def main():
         alert_rate=args.alert_rate,
         concentration_threshold=args.concentration_threshold,
         scale=True,
+        clean_abnormal_values=args.clean_abnormal_values,
+        frozen_sensor_window=args.frozen_sensor_window,
+        sensor_disagreement_z_threshold=args.sensor_disagreement_z_threshold,
     )
 
     # ---- Diagnostic output ----
