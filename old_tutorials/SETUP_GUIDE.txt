@@ -1,0 +1,107 @@
+GRISOUNET — Setup Guide
+========================
+
+1. CLONE / UPDATE THE REPO
+---------------------------
+If first time:
+  git clone git@github.com:ArthurVigier/grisounet.git
+  cd grisounet
+
+If already cloned:
+  git checkout master
+  git pull origin master
+
+
+2. CREATE YOUR LOCAL .env FILE
+-------------------------------
+At the root of the repo, create a file called .env with this content:
+
+DATA_SIZE=all
+CHUNK_SIZE=200
+MODEL_TARGET=local
+GCP_PROJECT=spheric-voyager-484810-k0
+GCP_REGION=europe-west1
+BUCKET_NAME=grisou_bucket
+BQ_REGION=EU
+BQ_DATASET=grisou
+BQ_TABLE=Table_grisou
+BQ_SOURCE=spheric-voyager-484810-k0.grisou.Table_grisou
+
+This file is gitignored so each person creates their own.
+DO NOT commit it.
+
+
+3. INSTALL DEPENDENCIES
+------------------------
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+
+4. GCP AUTHENTICATION
+----------------------
+gcloud auth login
+gcloud auth application-default login
+gcloud config set project spheric-voyager-484810-k0
+
+
+5. RUN THE PIPELINE LOCALLY
+-----------------------------
+python -m interface.workflow
+
+This will:
+  - Pull data from BigQuery
+  - Run preprocessing
+  - Train the LSTM model
+  - Save model to Cloud Storage (gs://grisou_bucket)
+  - Save history + predictions to BigQuery
+  - Generate analysis graphs
+
+
+6. ACCESS THE VM
+-----------------
+gcloud compute ssh grisou-instance --project=grisounet --zone=europe-west1-b
+
+Once connected:
+  cd /home/grisounet
+  git pull origin master
+  source venv/bin/activate
+  pip install -r requirements.txt
+  python -m interface.workflow
+
+VM specs: 16 vCPU, 104GB RAM (n1-highmem-16)
+VM IP: 35.195.12.106
+
+
+7. START THE API (on the VM)
+------------------------------
+cd /home/grisounet
+source venv/bin/activate
+uvicorn api.fast:app --host 0.0.0.0 --port 8000
+
+API accessible at: http://35.195.12.106:8000
+
+
+8. SECRET MANAGER
+------------------
+Secrets are stored in GCP project "grisounet".
+On the VM, the code reads from Secret Manager automatically.
+Locally, it falls back to your .env file.
+
+To read a secret:
+  gcloud secrets versions access latest --secret=GCP_PROJECT --project=grisounet
+
+To create/update a secret:
+  echo -n "new_value" | gcloud secrets create SECRET_NAME --project=grisounet --data-file=-
+
+Available secrets: GCP_PROJECT, BUCKET_NAME, BQ_DATASET, BQ_TABLE, BQ_REGION
+
+
+9. IMPORTANT NOTES
+--------------------
+- The VM runs Mon-Fri 9AM-6PM (Paris time) — auto starts and stops
+- Only Quentin can start/stop/resize the VM
+- You have SSH access + Secret Manager read/write access
+- Never commit the .env file
+- Always pull before pushing: git pull origin master
+- Create branches for your work: git checkout -b your-branch-name

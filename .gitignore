@@ -22,5 +22,3 @@ __pycache__/
 checkpoints/
 .pytest_cache/
 
-SETUP_GUIDE.txt
-TA_WALKTHROUGH.txt

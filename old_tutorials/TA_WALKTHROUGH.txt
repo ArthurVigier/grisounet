@@ -1,0 +1,131 @@
+GRISOUNET PROJECT — Walkthrough for Review
+============================================
+
+WHAT THE PROJECT DOES
+----------------------
+Methane sensor prediction using LSTM neural networks. We pull sensor data
+from BigQuery, preprocess it, train models, save results, and serve
+predictions via an API.
+
+
+ARCHITECTURE OVERVIEW
+----------------------
+3 environments:
+  - Local machines: each team member develops here with their own .env
+  - GitHub (ArthurVigier/grisounet): central repo, branch-based workflow with PRs
+  - GCP VM (grisou-instance): shared compute for training + API serving
+
+3 GCP services:
+  - BigQuery (project: spheric-voyager-484810-k0): stores raw data + indexed results
+  - Cloud Storage (gs://grisou_bucket): stores trained model files
+  - Secret Manager (project: grisounet): stores credentials securely
+
+
+WHAT WAS IMPLEMENTED
+---------------------
+
+1. Data pipeline (ml_logic/data.py)
+   - pull_data_from_bq(): pulls full dataset from BigQuery, saves timestamped CSV
+   - save_preprocessing_to_bq(): saves preprocessing results to a new indexed BQ table each run
+
+2. Model saving (ml_logic/model_save.py)
+   - save_model_to_gcs(): saves trained Keras model to Cloud Storage bucket
+   - load_model_from_gcs(): loads a specific model version back
+
+3. Results tracking (ml_logic/results_bq_save.py)
+   - save_history_to_bq(): saves training loss/metrics per epoch to indexed BQ table
+   - save_predictions_to_bq(): saves actual vs predicted per sensor to indexed BQ table
+
+4. Secret management (ml_logic/secrets.py)
+   - Centralized config: tries GCP Secret Manager first, falls back to local .env
+   - No credentials stored in code or on the VM in plain text
+
+5. Pipeline orchestrator (interface/workflow.py)
+   - Runs the full pipeline: pull data -> preprocess -> train -> save -> analyse
+
+6. Infrastructure
+   - VM: n1-highmem-16 (16 vCPU, 104GB RAM), europe-west1-b
+   - Auto-schedule: starts 9AM, stops 6PM Mon-Fri (Paris time)
+   - Firewall: port 8000 open for FastAPI
+   - IAM: team members have SSH + Secret Manager access, no VM config rights
+
+
+HOW TO TEST END-TO-END
+-----------------------
+
+Option A — From a local machine:
+
+  git clone git@github.com:ArthurVigier/grisounet.git
+  cd grisounet
+
+  # Create .env
+  cat > .env << 'EOF'
+  DATA_SIZE=all
+  CHUNK_SIZE=200
+  MODEL_TARGET=local
+  GCP_PROJECT=spheric-voyager-484810-k0
+  GCP_REGION=europe-west1
+  BUCKET_NAME=grisou_bucket
+  BQ_REGION=EU
+  BQ_DATASET=grisou
+  BQ_TABLE=Table_grisou
+  BQ_SOURCE=spheric-voyager-484810-k0.grisou.Table_grisou
+  EOF
+
+  # Setup
+  python3 -m venv venv
+  source venv/bin/activate
+  pip install -r requirements.txt
+
+  # Authenticate
+  gcloud auth login
+  gcloud auth application-default login
+
+  # Run pipeline
+  python -m interface.workflow
+
+
+Option B — From the VM:
+
+  gcloud compute ssh grisou-instance --project=grisounet --zone=europe-west1-b
+
+  cd /home/grisounet
+  git pull origin master
+  source venv/bin/activate
+  pip install -r requirements.txt
+  python -m interface.workflow
+
+
+WHAT TO VERIFY
+---------------
+1. Data pulled from BigQuery without errors (check BQ_REGION=EU)
+2. Preprocessing results saved to a new preprocess_YYYYMMDD_HHMMSS table in BQ
+3. Model saved to gs://grisou_bucket/models/
+4. Training history saved to history_YYYYMMDD_HHMMSS table in BQ
+5. Predictions saved to predictions_YYYYMMDD_HHMMSS table in BQ
+6. On the VM, Secret Manager is used (no .env needed)
+7. API starts with: uvicorn api.fast:app --host 0.0.0.0 --port 8000
+   Accessible at: http://35.195.12.106:8000
+
+
+KEY FILES
+----------
+ml_logic/
+  secrets.py          — Secret Manager + .env fallback
+  data.py             — BQ pull + preprocessing save
+  preprocessor.py     — scaling, splitting, slicing
+  model.py            — LSTM + Conv1D models
+  model_save.py       — save/load models to GCS
+  results_bq_save.py  — save history + predictions to BQ
+interface/
+  workflow.py         — full pipeline orchestrator
+api/
+  fast.py             — FastAPI endpoints
+
+
+GIT WORKFLOW USED
+------------------
+- Feature branches for each piece of work
+- PRs into master with review
+- .env gitignored (each person creates their own locally)
+- VM synced via: git pull origin master
