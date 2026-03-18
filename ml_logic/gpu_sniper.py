@@ -29,24 +29,6 @@ DEFAULT_ZONE_FILTERS = ("europe",)
 DEFAULT_TARGETS_JSON = json.dumps(
     [
         {
-            "gpu_type": "nvidia-h100-80gb",
-            "machine_type": "a3-highgpu-1g",
-            "attach_accelerator": False,
-            "accelerator_count": 1,
-        },
-        {
-            "gpu_type": "nvidia-a100-80gb",
-            "machine_type": "a2-ultragpu-1g",
-            "attach_accelerator": False,
-            "accelerator_count": 1,
-        },
-        {
-            "gpu_type": "nvidia-tesla-a100",
-            "machine_type": "a2-highgpu-1g",
-            "attach_accelerator": False,
-            "accelerator_count": 1,
-        },
-        {
             "gpu_type": "nvidia-l4",
             "machine_type": "g2-standard-4",
             "attach_accelerator": False,
@@ -72,12 +54,6 @@ DEFAULT_TARGETS_JSON = json.dumps(
         },
         {
             "gpu_type": "nvidia-tesla-p4",
-            "machine_type": "n1-standard-4",
-            "attach_accelerator": True,
-            "accelerator_count": 1,
-        },
-        {
-            "gpu_type": "nvidia-tesla-k80",
             "machine_type": "n1-standard-4",
             "attach_accelerator": True,
             "accelerator_count": 1,
