@@ -1,8 +1,9 @@
 import json
 import pickle
 from pathlib import Path
+from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from ml_logic.model_save import load_model_from_gcs
 from ml_logic.data import load_modeling_dataframe
@@ -90,6 +91,42 @@ def _get_mm256_model(timestamp: str):
             "scalers": scalers,
         }
     return _cached_mm256_models[key]
+
+
+def _build_mm256_day_plot_urls(
+    *,
+    date_str: str,
+    model_timestamp: str,
+    risk_threshold: float,
+    period_padding_seconds: int,
+):
+    query = {
+        "date": date_str,
+        "model_timestamp": model_timestamp,
+        "risk_threshold": risk_threshold,
+        "period_padding_seconds": period_padding_seconds,
+    }
+    encoded = urlencode(query)
+    return {
+        "whole_day_png": f"/mm256/day/plot?{encoded}",
+        "threshold_window_png": f"/mm256/day/event-plot?{encoded}",
+    }
+
+
+def _raise_mm256_day_http_error(exc: Exception):
+    detail = str(exc)
+    if isinstance(exc, FileNotFoundError) or "Not found: Table" in detail:
+        raise HTTPException(status_code=404, detail=detail) from exc
+    if "No MM256 prediction rows found" in detail:
+        raise HTTPException(status_code=404, detail=detail) from exc
+    raise HTTPException(status_code=400, detail=detail) from exc
+
+
+def _resolve_mm256_run_timestamp(
+    model_timestamp: Optional[str],
+    run_timestamp: Optional[str],
+) -> Optional[str]:
+    return run_timestamp or model_timestamp
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +250,98 @@ def predict_mm256_info():
             "branch internally from the provided sequence windows."
         ),
     }
+
+
+@app.get("/mm256/day")
+def mm256_day(
+    date: str,
+    model_timestamp: Optional[str] = None,
+    run_timestamp: Optional[str] = None,
+    risk_threshold: float = 1.5,
+    period_padding_seconds: int = 180,
+    save_graphs: bool = False,
+    upload_graphs: bool = False,
+):
+    """Return BigQuery-backed MM256 actual/predicted/residual data for one day."""
+    try:
+        from ml_logic.mm256_day_service import (
+            build_mm256_day_context,
+            build_mm256_day_payload_from_context,
+            save_mm256_day_assets,
+        )
+
+        context = build_mm256_day_context(
+            date_str=date,
+            run_timestamp=_resolve_mm256_run_timestamp(model_timestamp, run_timestamp),
+            risk_threshold=risk_threshold,
+            period_padding_seconds=period_padding_seconds,
+        )
+        payload = build_mm256_day_payload_from_context(context, include_points=True)
+        if save_graphs or upload_graphs:
+            payload["saved_assets"] = save_mm256_day_assets(
+                context,
+                upload_to_gcs=upload_graphs,
+            )
+    except Exception as exc:
+        _raise_mm256_day_http_error(exc)
+
+    payload["plots"] = _build_mm256_day_plot_urls(
+        date_str=date,
+        model_timestamp=payload["model_timestamp"],
+        risk_threshold=risk_threshold,
+        period_padding_seconds=period_padding_seconds,
+    )
+    return payload
+
+
+@app.get("/mm256/day/plot")
+def mm256_day_plot(
+    date: str,
+    model_timestamp: Optional[str] = None,
+    run_timestamp: Optional[str] = None,
+    risk_threshold: float = 1.5,
+    period_padding_seconds: int = 180,
+):
+    """Render the full-day MM256 chart from saved BigQuery predictions."""
+    try:
+        from ml_logic.mm256_day_service import build_mm256_day_context, render_mm256_day_plot_png
+
+        context = build_mm256_day_context(
+            date_str=date,
+            run_timestamp=_resolve_mm256_run_timestamp(model_timestamp, run_timestamp),
+            risk_threshold=risk_threshold,
+            period_padding_seconds=period_padding_seconds,
+        )
+        png_bytes = render_mm256_day_plot_png(context)
+    except Exception as exc:
+        _raise_mm256_day_http_error(exc)
+
+    return Response(content=png_bytes, media_type="image/png")
+
+
+@app.get("/mm256/day/event-plot")
+def mm256_day_event_plot(
+    date: str,
+    model_timestamp: Optional[str] = None,
+    run_timestamp: Optional[str] = None,
+    risk_threshold: float = 1.5,
+    period_padding_seconds: int = 180,
+):
+    """Render the zoomed MM256 threshold-event chart as PNG."""
+    try:
+        from ml_logic.mm256_day_service import build_mm256_day_context, render_mm256_event_plot_png
+
+        context = build_mm256_day_context(
+            date_str=date,
+            run_timestamp=_resolve_mm256_run_timestamp(model_timestamp, run_timestamp),
+            risk_threshold=risk_threshold,
+            period_padding_seconds=period_padding_seconds,
+        )
+        png_bytes = render_mm256_event_plot_png(context)
+    except Exception as exc:
+        _raise_mm256_day_http_error(exc)
+
+    return Response(content=png_bytes, media_type="image/png")
 
 
 # ---------------------------------------------------------------------------
