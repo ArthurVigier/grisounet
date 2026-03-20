@@ -25,11 +25,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ZONE_FILTERS = (
-    "europe-west4",  # Netherlands
-    "europe-west2",  # London
-    "europe-west3",  # Germany
-)
+DEFAULT_ZONE_FILTERS = ("europe",)
 DEFAULT_TARGETS_JSON = json.dumps(
     [
         {
@@ -40,6 +36,24 @@ DEFAULT_TARGETS_JSON = json.dumps(
         },
         {
             "gpu_type": "nvidia-tesla-t4",
+            "machine_type": "n1-standard-4",
+            "attach_accelerator": True,
+            "accelerator_count": 1,
+        },
+        {
+            "gpu_type": "nvidia-tesla-v100",
+            "machine_type": "n1-standard-4",
+            "attach_accelerator": True,
+            "accelerator_count": 1,
+        },
+        {
+            "gpu_type": "nvidia-tesla-p100",
+            "machine_type": "n1-standard-4",
+            "attach_accelerator": True,
+            "accelerator_count": 1,
+        },
+        {
+            "gpu_type": "nvidia-tesla-p4",
             "machine_type": "n1-standard-4",
             "attach_accelerator": True,
             "accelerator_count": 1,
