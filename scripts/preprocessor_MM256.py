@@ -22,6 +22,7 @@ import argparse
 import gc
 import os
 import sys
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -33,7 +34,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from ml_logic.data import load_modeling_dataframe
-from ml_logic.data_cleaning import clean_dataframe
+from ml_logic.data_cleaning import SENSOR_BOUNDS, clean_dataframe
 from ml_logic.secrets import get_secret
 
 TARGET_SENSOR = "MM256"
@@ -50,24 +51,16 @@ FEATURES_KEEP = ["MM256", "AN422", "AMP1_IR", "AN423", "F_SIDE"]
 SEQUENCE_INPUT_NAME = "sequence_input"
 CATCH22_INPUT_NAME = "catch22_input"
 
-# Days with sensor saturation (MM256 peaks at 30%, physically unrealistic).
-# These are excluded before training to avoid teaching the model bogus patterns.
-EXCLUDED_DATES = [
-    "2014-03-04",
-    "2014-04-03",
-    "2014-04-28",
-    "2014-05-28",
-]
+MAX_DAILY_PEAK_MM256 = float(SENSOR_BOUNDS[TARGET_SENSOR][1])
 
 
 def identify_active_days(
     df: pd.DataFrame,
     concentration_threshold: float = 1.0,
     excluded_dates: list[str] | None = None,
+    max_daily_peak_mm256: float | None = MAX_DAILY_PEAK_MM256,
 ) -> pd.DataFrame:
-    """Return unique dates where MM256 peaked above the threshold."""
-    if excluded_dates is None:
-        excluded_dates = EXCLUDED_DATES
+    """Return active MM256 days while excluding only clearly saturated days."""
     daily = df.groupby(df.index.date).agg(
         day_peak_mm256=(TARGET_SENSOR, "max"),
         n_seconds_above=(TARGET_SENSOR, lambda s: (s >= concentration_threshold).sum()),
@@ -75,6 +68,23 @@ def identify_active_days(
     active = daily[daily["day_peak_mm256"] >= concentration_threshold].copy()
     active.index.name = "date"
     active = active.reset_index()
+
+    if max_daily_peak_mm256 is not None:
+        saturated_mask = active["day_peak_mm256"] > max_daily_peak_mm256
+        n_excluded = int(saturated_mask.sum())
+        if n_excluded > 0:
+            excluded = (
+                active.loc[saturated_mask, ["date", "day_peak_mm256"]]
+                .sort_values("date")
+                .reset_index(drop=True)
+            )
+            excluded_dates_str = excluded["date"].astype(str).tolist()
+            print(
+                "Excluded"
+                f" {n_excluded} saturated MM256 days with daily peak > {max_daily_peak_mm256}%:"
+                f" {excluded_dates_str}"
+            )
+        active = active.loc[~saturated_mask].reset_index(drop=True)
 
     if excluded_dates:
         exclude_set = set(pd.to_datetime(excluded_dates).date)
@@ -106,6 +116,8 @@ def preprocess_mm256(
     clean_abnormal_values: bool = False,
     frozen_sensor_window: int = 3600,
     sensor_disagreement_z_threshold: float = 6.0,
+    enable_sensor_disagreement: bool = False,
+    max_daily_peak_mm256: float | None = MAX_DAILY_PEAK_MM256,
 ) -> tuple:
     """Load data, filter to active days, engineer features, and optionally scale."""
     print(f"\n{'='*60}")
@@ -133,6 +145,7 @@ def preprocess_mm256(
         "applied": bool(clean_abnormal_values),
         "frozen_sensor_window": int(frozen_sensor_window),
         "sensor_disagreement_z_threshold": float(sensor_disagreement_z_threshold),
+        "sensor_disagreement_enabled": bool(enable_sensor_disagreement),
         "rows_before_cleaning": int(total_rows),
         "rows_after_cleaning": int(total_rows),
         "rows_removed": 0,
@@ -142,6 +155,7 @@ def preprocess_mm256(
         print(
             "Running anomaly cleaning before MM256 preprocessing"
             f" (frozen_window={frozen_sensor_window}s,"
+            f" disagreement={'on' if enable_sensor_disagreement else 'off'},"
             f" disagreement_z={sensor_disagreement_z_threshold})..."
         )
         df = clean_dataframe(
@@ -149,6 +163,7 @@ def preprocess_mm256(
             drop=True,
             frozen_window=frozen_sensor_window,
             z_threshold=sensor_disagreement_z_threshold,
+            use_sensor_disagreement=enable_sensor_disagreement,
             verbose=True,
         )
         cleaned_rows = len(df)
@@ -159,7 +174,11 @@ def preprocess_mm256(
             f" ({cleaned_rows / total_rows * 100:.1f}% kept)"
         )
 
-    active_days = identify_active_days(df, concentration_threshold)
+    active_days = identify_active_days(
+        df,
+        concentration_threshold=concentration_threshold,
+        max_daily_peak_mm256=max_daily_peak_mm256,
+    )
     print(f"Active days (MM256 peak >= {concentration_threshold}%): {len(active_days)}")
     if len(active_days) > 0:
         print(f"  Date range: {active_days['date'].min()} to {active_days['date'].max()}")
@@ -205,6 +224,7 @@ def preprocess_mm256(
         "target_sensor": TARGET_SENSOR,
         "concentration_threshold": concentration_threshold,
         "alert_rate": alert_rate,
+        "max_daily_peak_mm256": max_daily_peak_mm256,
         "total_rows_raw": total_rows,
         "active_days": active_days,
         "n_active_days": len(active_days),
@@ -373,6 +393,20 @@ def slice_windows_mm256(
 
 def _get_catch22_transformer():
     """Instantiate aeon's Catch22 transformer with a clear dependency error."""
+    cache_dir = os.environ.get("NUMBA_CACHE_DIR")
+    if not cache_dir:
+        cache_dir = os.path.join(tempfile.gettempdir(), "numba-cache")
+        os.environ["NUMBA_CACHE_DIR"] = cache_dir
+    os.makedirs(cache_dir, exist_ok=True)
+
+    try:
+        from numba.core import config as numba_config
+
+        if not getattr(numba_config, "CACHE_DIR", ""):
+            numba_config.CACHE_DIR = cache_dir
+    except Exception:
+        pass
+
     try:
         from aeon.transformations.collection.feature_based import Catch22
     except ImportError as exc:
@@ -632,10 +666,13 @@ def main():
     parser.add_argument("--cache-raw", action="store_true")
     parser.add_argument("--alert-rate", type=float, default=1.0, help="Methane %% threshold for ALERT flag")
     parser.add_argument("--concentration-threshold", type=float, default=1.0, help="Min daily peak MM256 %% to include a day")
+    parser.add_argument("--enable-cleaning", dest="clean_abnormal_values", action="store_true", help="Enable anomaly cleaning before MM256 preprocessing")
     parser.add_argument("--skip-cleaning", dest="clean_abnormal_values", action="store_false", help="Disable anomaly cleaning before MM256 preprocessing")
     parser.add_argument("--frozen-sensor-window", type=int, default=3600, help="Frozen-sensor detection window in seconds (default: 3600)")
+    parser.add_argument("--enable-sensor-disagreement", action="store_true", help="Re-enable the standard-deviation disagreement filter between co-located sensors")
     parser.add_argument("--sensor-disagreement-z-threshold", type=float, default=6.0, help="Accepted z-score gap between co-located sensors (default: 6.0)")
-    parser.set_defaults(clean_abnormal_values=True)
+    parser.add_argument("--max-daily-peak-mm256", type=float, default=MAX_DAILY_PEAK_MM256, help="Exclude days whose daily MM256 peak exceeds this value (default: 10.0)")
+    parser.set_defaults(clean_abnormal_values=False)
 
     parser.add_argument("--window-length", type=int, default=300, help="Total window length in seconds (input + forecast)")
     parser.add_argument("--forecast-horizon", type=int, default=120, help="Forecast horizon in seconds")
@@ -655,6 +692,8 @@ def main():
         clean_abnormal_values=args.clean_abnormal_values,
         frozen_sensor_window=args.frozen_sensor_window,
         sensor_disagreement_z_threshold=args.sensor_disagreement_z_threshold,
+        enable_sensor_disagreement=args.enable_sensor_disagreement,
+        max_daily_peak_mm256=args.max_daily_peak_mm256,
     )
 
     print(f"\n--- Preprocessing summary ---")

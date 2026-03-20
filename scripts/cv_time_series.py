@@ -22,6 +22,7 @@ from ml_logic.secrets import get_secret
 from scripts.preprocessor_MM256 import (
     TARGET_SENSOR,
     build_mm256_model_inputs,
+    build_window_index_mm256,
     fit_transform_catch22_windows,
     preprocess_mm256,
     scale_fold,
@@ -129,6 +130,64 @@ def select_validation_monitor_subset(
 def inference_batch_size(batch_size: int) -> int:
     """Use a larger batch for validation / inference than for training."""
     return max(int(batch_size), 512)
+
+
+def build_window_balanced_folds_mm256(
+    train_df: pd.DataFrame,
+    n_splits: int = 5,
+    gap: int = 300,
+    window_length: int = 300,
+    forecast_horizon: int = 120,
+) -> list[dict]:
+    """Plan chronological CV folds on valid MM256 windows instead of raw rows.
+
+    This keeps validation folds balanced in terms of actual alert-triggered
+    training examples rather than raw timestamp counts.
+    """
+    window_index = build_window_index_mm256(
+        train_df,
+        0,
+        len(train_df),
+        window_length,
+        forecast_horizon,
+        require_alert_trigger=True,
+    )
+    if window_index.empty:
+        raise ValueError("No valid MM256 alert-triggered windows available for CV.")
+
+    # A one-second sliding window needs at least one full window-length gap to
+    # prevent train/validation overlap in raw timesteps.
+    window_gap = max(int(gap), int(window_length))
+    splitter = TimeSeriesSplit(n_splits=n_splits, gap=window_gap)
+    sample_ids = np.arange(len(window_index), dtype=np.int64)
+
+    try:
+        split_pairs = list(splitter.split(sample_ids))
+    except ValueError as exc:
+        raise ValueError(
+            "Unable to build MM256 window-balanced CV folds. "
+            f"n_windows={len(window_index)}, n_splits={n_splits}, gap={window_gap}."
+        ) from exc
+
+    folds = []
+    for fold_idx, (train_idx, val_idx) in enumerate(split_pairs, start=1):
+        train_windows = window_index.iloc[train_idx].reset_index(drop=True)
+        val_windows = window_index.iloc[val_idx].reset_index(drop=True)
+        folds.append(
+            {
+                "fold": fold_idx,
+                "train_windows": train_windows,
+                "val_windows": val_windows,
+                "train_end_time": train_windows["target_end_time"].iloc[-1],
+                "val_start_time": val_windows["input_start_time"].iloc[0],
+                "val_end_time": val_windows["target_end_time"].iloc[-1],
+                "n_train_windows": int(len(train_windows)),
+                "n_val_windows": int(len(val_windows)),
+                "window_gap": int(window_gap),
+            }
+        )
+
+    return folds
 
 
 def build_last_input_baseline(X: np.ndarray, target_feature_idx: int, horizon: int) -> np.ndarray:
@@ -278,13 +337,21 @@ def run_cv_mm256(
     os.makedirs(plots_dir, exist_ok=True)
 
     print(f"\n{'='*60}")
-    print(f"  TimeSeriesSplit CV — MM256 — {n_splits} folds")
-    print(f"  gap={gap}  window={window_length}s  horizon={forecast_horizon}s")
+    print(f"  Window-Balanced CV — MM256 — {n_splits} folds")
+    print(
+        f"  gap={max(int(gap), int(window_length))} windows"
+        f"  window={window_length}s  horizon={forecast_horizon}s"
+    )
     print(f"  model={model_variant}  timestamp={timestamp}")
     print(f"{'='*60}\n")
 
-    tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
-    indices = np.arange(len(train_df))
+    fold_plan = build_window_balanced_folds_mm256(
+        train_df=train_df,
+        n_splits=n_splits,
+        gap=gap,
+        window_length=window_length,
+        forecast_horizon=forecast_horizon,
+    )
     metric_keys = get_metric_keys(
         pinball_quantile,
         include_secondary_diagnostics=include_secondary_diagnostics,
@@ -294,14 +361,19 @@ def run_cv_mm256(
     fold_histories = []
     fold_horizon_metrics = []
 
-    for fold_idx, (train_idx, val_idx) in enumerate(tscv.split(indices), start=1):
+    for fold in fold_plan:
+        fold_idx = int(fold["fold"])
         fold_t = perf_counter()
         print(f"{'─'*50}")
         print(f"Fold {fold_idx}/{n_splits}")
 
-        fold_train_df = train_df.iloc[train_idx]
-        fold_val_df = train_df.iloc[val_idx]
-        print(f"  Train rows: {len(fold_train_df):,}  |  Val rows: {len(fold_val_df):,}")
+        fold_train_df = train_df.loc[: fold["train_end_time"]].copy()
+        fold_val_df = train_df.loc[fold["val_start_time"] : fold["val_end_time"]].copy()
+        print(
+            f"  Train windows: {fold['n_train_windows']:,}"
+            f"  |  Val windows: {fold['n_val_windows']:,}"
+        )
+        print(f"  Train support rows: {len(fold_train_df):,}  |  Val support rows: {len(fold_val_df):,}")
         print(f"  Train period: {fold_train_df.index.min()} -> {fold_train_df.index.max()}")
         print(f"  Val period:   {fold_val_df.index.min()} -> {fold_val_df.index.max()}")
 
@@ -320,6 +392,20 @@ def run_cv_mm256(
             window_length,
             forecast_horizon,
         )
+
+        expected_train_windows = int(fold["n_train_windows"])
+        expected_val_windows = int(fold["n_val_windows"])
+        if X_train.shape[0] != expected_train_windows:
+            raise ValueError(
+                "Window-balanced CV produced a training-window mismatch: "
+                f"expected {expected_train_windows}, got {X_train.shape[0]}."
+            )
+        if X_val.shape[0] != expected_val_windows:
+            raise ValueError(
+                "Window-balanced CV produced a validation-window mismatch: "
+                f"expected {expected_val_windows}, got {X_val.shape[0]}."
+            )
+
         X_train_c22 = None
         X_val_c22 = None
 
@@ -434,6 +520,8 @@ def run_cv_mm256(
         metrics["status"] = "ok"
         metrics["n_train_windows"] = int(X_train.shape[0])
         metrics["n_val_windows"] = int(X_val.shape[0])
+        metrics["n_train_support_rows"] = int(len(fold_train_df))
+        metrics["n_val_support_rows"] = int(len(fold_val_df))
         metrics["n_val_monitor_windows"] = int(X_val_monitor_seq.shape[0])
         metrics["use_catch22"] = bool(use_catch22)
         metrics["n_catch22_features"] = int(0 if X_train_c22 is None else X_train_c22.shape[1])

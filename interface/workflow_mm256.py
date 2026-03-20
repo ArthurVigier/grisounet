@@ -24,7 +24,7 @@ if PROJECT_ROOT not in sys.path:
 from dotenv import load_dotenv
 
 from scripts.cv_time_series import run_cv_mm256
-from scripts.preprocessor_MM256 import preprocess_mm256
+from scripts.preprocessor_MM256 import MAX_DAILY_PEAK_MM256, preprocess_mm256
 from scripts.train_final_mm256 import train_final_mm256
 
 load_dotenv()
@@ -57,6 +57,8 @@ def run_pipeline_mm256(
     clean_abnormal_values: bool = False,
     frozen_sensor_window: int = 3600,
     sensor_disagreement_z_threshold: float = 6.0,
+    enable_sensor_disagreement: bool = False,
+    max_daily_peak_mm256: float = MAX_DAILY_PEAK_MM256,
     train_ratio: float = 0.7,
     n_splits: int = 5,
     gap: int = 300,
@@ -96,6 +98,8 @@ def run_pipeline_mm256(
         clean_abnormal_values=clean_abnormal_values,
         frozen_sensor_window=frozen_sensor_window,
         sensor_disagreement_z_threshold=sensor_disagreement_z_threshold,
+        enable_sensor_disagreement=enable_sensor_disagreement,
+        max_daily_peak_mm256=max_daily_peak_mm256,
     )
     print(f"  Done in {_fmt(perf_counter() - step_t)}")
 
@@ -189,6 +193,8 @@ def run_cv_pipeline_mm256(
     clean_abnormal_values: bool = False,
     frozen_sensor_window: int = 3600,
     sensor_disagreement_z_threshold: float = 6.0,
+    enable_sensor_disagreement: bool = False,
+    max_daily_peak_mm256: float = MAX_DAILY_PEAK_MM256,
     train_ratio: float = 0.7,
     n_splits: int = 5,
     gap: int = 300,
@@ -215,6 +221,8 @@ def run_cv_pipeline_mm256(
         clean_abnormal_values=clean_abnormal_values,
         frozen_sensor_window=frozen_sensor_window,
         sensor_disagreement_z_threshold=sensor_disagreement_z_threshold,
+        enable_sensor_disagreement=enable_sensor_disagreement,
+        max_daily_peak_mm256=max_daily_peak_mm256,
     )
     train_df, _ = split_temporal_holdout(data, train_ratio=train_ratio)
     return run_cv_mm256(
@@ -245,7 +253,9 @@ def main():
     parser.add_argument("--concentration-threshold", type=float, default=1.0)
     parser.add_argument("--enable-cleaning", dest="clean_abnormal_values", action="store_true")
     parser.add_argument("--frozen-sensor-window", type=int, default=3600)
+    parser.add_argument("--enable-sensor-disagreement", action="store_true")
     parser.add_argument("--sensor-disagreement-z-threshold", type=float, default=6.0)
+    parser.add_argument("--max-daily-peak-mm256", type=float, default=MAX_DAILY_PEAK_MM256)
     parser.set_defaults(clean_abnormal_values=False)
     parser.add_argument("--train-ratio", type=float, default=0.7)
     parser.add_argument("--n-splits", type=int, default=5)
@@ -258,8 +268,9 @@ def main():
     parser.add_argument("--pinball-quantile", type=float, default=0.8)
     parser.add_argument("--validation-monitor-max-windows", type=int, default=8192)
     parser.add_argument("--model-variant", choices=["simple", "advanced"], default="advanced")
-    parser.add_argument("--skip-cv", action="store_true", default=True)
+    parser.add_argument("--skip-cv", action="store_true")
     parser.add_argument("--run-cv", dest="skip_cv", action="store_false")
+    parser.set_defaults(skip_cv=True)
     parser.add_argument("--push-bq", action="store_true")
     parser.add_argument("--save-cv-plots", action="store_true")
     parser.add_argument("--save-final-analysis", action="store_true")
@@ -282,6 +293,8 @@ def main():
             clean_abnormal_values=args.clean_abnormal_values,
             frozen_sensor_window=args.frozen_sensor_window,
             sensor_disagreement_z_threshold=args.sensor_disagreement_z_threshold,
+            enable_sensor_disagreement=args.enable_sensor_disagreement,
+            max_daily_peak_mm256=args.max_daily_peak_mm256,
             train_ratio=args.train_ratio,
             n_splits=args.n_splits,
             gap=args.gap,
@@ -308,6 +321,8 @@ def main():
         clean_abnormal_values=args.clean_abnormal_values,
         frozen_sensor_window=args.frozen_sensor_window,
         sensor_disagreement_z_threshold=args.sensor_disagreement_z_threshold,
+        enable_sensor_disagreement=args.enable_sensor_disagreement,
+        max_daily_peak_mm256=args.max_daily_peak_mm256,
         train_ratio=args.train_ratio,
         n_splits=args.n_splits,
         gap=args.gap,
