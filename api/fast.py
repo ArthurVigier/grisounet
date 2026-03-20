@@ -93,13 +93,17 @@ def _get_mm256_model(timestamp: str):
 
 
 # ---------------------------------------------------------------------------
-# Existing endpoints — 3-sensor pipeline
+# DEPRECATED — Legacy 3-sensor pipeline endpoints.
+# These endpoints use the original 3-sensor preprocessor (MM256+MM263+MM264)
+# and will be removed in a future version. Use the /predict_mm256 and
+# /preprocess_mm256 endpoints instead.
 # ---------------------------------------------------------------------------
 @app.get("/preprocess")
 def preprocess(start_index: int, stop_index: int):
-    """
-    Preprocess data and return sliced train/test arrays.
-    Uses cached data to avoid pulling from BQ on every call.
+    """[DEPRECATED] Preprocess data and return sliced train/test arrays.
+
+    This endpoint uses the legacy 3-sensor pipeline and will be removed
+    in a future version. Use /preprocess_mm256 instead.
     """
     train_data, test_data = _get_preprocessed_data()
     X_train, y_train = slice_arrays(train_data, start_index, stop_index)
@@ -119,7 +123,10 @@ class PredictRequest(BaseModel):
 
 @app.post("/predict")
 def predict(data: PredictRequest):
-    """Predict using the 3-sensor model."""
+    """[DEPRECATED] Predict using the legacy 3-sensor model.
+
+    This endpoint will be removed in a future version. Use /predict_mm256 instead.
+    """
     model = _get_model(data.timestamp)
 
     if model is None:

@@ -1,4 +1,4 @@
-.PHONY: data pull_bq preprocess_split slice_arrays gpu_snipe gpu_snipe_dry_run
+.PHONY: data pull_bq preprocess_split slice_arrays gpu_snipe gpu_snipe_dry_run mm256_full mm256_cv mm256_single setup
 
 data: pull_bq
 
@@ -19,3 +19,15 @@ gpu_snipe:
 
 gpu_snipe_dry_run:
 	python scripts/gpu_sniper.py --dry-run
+
+mm256_full:
+	python interface/workflow_mm256.py --mode full --source cache
+
+mm256_cv:
+	python interface/workflow_mm256.py --mode cv --source cache
+
+mm256_single:
+	python interface/workflow_mm256.py --mode full --source cache --skip-cv
+
+setup:
+	mkdir -p results/raw_pulls results/preprocessing results/models results/predictions results/model_history results/graphs

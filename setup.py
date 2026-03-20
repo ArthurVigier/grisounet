@@ -20,7 +20,7 @@ def parse_requirements(path: str) -> list[str]:
 setup(
     name="grisounet",
     version="0.0.1",
-    description="Detection de taux de concentration de PM2.5 à partir de données de séries temporelles",
+    description="Methane concentration forecasting for underground mining using time-series sensor data",
     license="MIT",
     author="Multiple",
     # url="https://github.com/lewagon/taxi-fare",
